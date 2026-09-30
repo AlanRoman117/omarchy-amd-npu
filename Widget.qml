@@ -75,9 +75,9 @@ Panel {
   }
 
   function statusCaption() {
-    if (switching) return onNpu ? "SWITCHING OFF..." : "STARTING ON THE NPU..."
-    if (status === "ready" && info.backend === "remote") return "READY - WHISPER ON THE NPU"
-    if (status === "ready") return "SERVER UP - VOXTYPE ON LOCAL MODEL"
+    if (switching) return onNpu ? "STOPPING..." : "STARTING..."
+    if (status === "ready" && info.backend === "remote") return "READY"
+    if (status === "ready") return "LOCAL MODEL"
     return "STOPPED"
   }
 

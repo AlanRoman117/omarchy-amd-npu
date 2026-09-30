@@ -58,20 +58,24 @@ commands you run yourself.
 | `npu-dictation check` | Is this machine supported, and what's installed? |
 | `npu-dictation install` | Installs `xrt`, `xrt-plugin-amdxdna` and `fastflowlm`, and lifts the memlock limit for your user session (sudo; reboot after) |
 | `npu-dictation enable` | Downloads Whisper (620 MB), starts `flm-asr.service`, and switches Voxtype to it (backs up the config first). Safe to re-run. |
-| `npu-dictation status` | Service, server, model, firmware, Voxtype backend, last dictation time |
+| `npu-dictation status` | Service, server, model, firmware, Voxtype backend, last dictation time (`--json` for scripts) |
+| `npu-dictation ping` | Quiet live request: `ok <seconds>` or `fail <code>` (used by the card's Test button) |
 | `npu-dictation doctor` | `status` plus a live transcription request |
 | `npu-dictation disable` | Voxtype back to its local model; stops the server and frees the NPU |
 | `npu-dictation remove` | `disable` + delete the service; asks before deleting the model, packages and memlock settings |
 
 ## The bar widget
 
-A chip icon on the right of the bar:
+A chip icon on the right of the bar: bright when the NPU server is up, dimmed when it's stopped,
+hidden when it isn't set up. Click it for a card in the same style as Omarchy's Wi-Fi, Bluetooth and
+power panels:
 
-| Icon | Meaning | Click |
-|---|---|---|
-| bright | NPU server running and answering | opens `npu-dictation status` |
-| dimmed | server stopped | starts it |
-| hidden | not set up | — |
+- **Header:** state (READY / LOCAL MODEL / STOPPED) and how long your last dictation took.
+- **Dictate on the NPU:** a switch. On runs `npu-dictation enable`; off runs `npu-dictation disable`,
+  which puts Voxtype back on its local model and frees the NPU.
+- **Details:** model, NPU firmware, server address, Voxtype backend.
+- **Test NPU:** sends a live request and shows the result in the card. **Full status** opens the
+  terminal view.
 
 Recording and transcribing are already shown by Omarchy's built-in dictation indicator, so this
 widget doesn't repeat them.
