@@ -1,0 +1,623 @@
+#!/bin/bash
+
+# amd-npu: dictation and small local LLMs on the AMD XDNA2 NPU (FastFlowLM).
+# Whisper serves Omarchy's Voxtype dictation; an optional LLM can run next to
+# it (share) or take the NPU alone (exclusive, dictation falls back to CPU).
+#
+# Usage: amd-npu <command> [args]   (amd-npu help)
+
+set -euo pipefail
+
+VERSION=0.2.0
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+
+PORT=52625
+URL="http://127.0.0.1:$PORT"
+WHISPER="whisper-v3:turbo"
+WHISPER_DIR="$CONFIG_HOME/flm/models/Whisper-V3-Turbo-NPU2"
+UNIT="amd-npu.service"
+UNIT_FILE="$CONFIG_HOME/systemd/user/$UNIT"
+LEGACY_UNIT="flm-asr.service"
+STATE_DIR="$CONFIG_HOME/amd-npu"
+SERVER_ENV="$STATE_DIR/server.env"
+VOXTYPE_CONFIG="$CONFIG_HOME/voxtype/config.toml"
+PLUGIN_ID="alanroman117.amd-npu"
+PACKAGES=(xrt xrt-plugin-amdxdna fastflowlm)
+
+# The NPU runtime pins model weights, so the user service manager (and the
+# user's terminals, for `flm validate`) need an unlimited memlock limit.
+# Scoped to user sessions only: system services keep their defaults.
+MEMLOCK_USER_AT="/etc/systemd/system/user@.service.d/90-amd-npu-memlock.conf"
+MEMLOCK_USER_CONF="/etc/systemd/user.conf.d/90-amd-npu-memlock.conf"
+MEMLOCK_LIMITS="/etc/security/limits.d/90-amd-npu-memlock.conf"
+
+# --- output helpers ---------------------------------------------------------
+
+ok() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+bad() { printf '  \033[31m✗\033[0m %s\n' "$*"; }
+note() { printf '  \033[33m•\033[0m %s\n' "$*"; }
+step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+die() { printf '\033[31mError:\033[0m %s\n' "$*" >&2; exit 1; }
+
+YES=0
+confirm() {
+  (( YES )) && return 0
+  if command -v gum >/dev/null && [[ -t 0 ]]; then
+    gum confirm "$1"
+  else
+    read -r -p "$1 [y/N] " reply
+    [[ $reply == [yY]* ]]
+  fi
+}
+
+notify() {
+  if command -v omarchy-notification-send >/dev/null; then
+    omarchy-notification-send "$1" "$2" -t 8000 >/dev/null 2>&1 || true
+  elif command -v notify-send >/dev/null; then
+    notify-send "$1" "$2" >/dev/null 2>&1 || true
+  fi
+}
+
+refresh_widget() {
+  command -v omarchy-shell >/dev/null && omarchy-shell "$PLUGIN_ID" refresh >/dev/null 2>&1 || true
+}
+
+# --- hardware and state probes ---------------------------------------------
+
+# Prints "xdna2", "xdna1" or "none" from the PCI bus (no lspci dependency).
+npu_generation() {
+  local dev vendor device
+  for dev in /sys/bus/pci/devices/*; do
+    vendor=$(<"$dev/vendor") device=$(<"$dev/device")
+    [[ $vendor == 0x1022 ]] || continue
+    case $device in
+      0x17f0) echo xdna2; return ;;
+      0x1502) echo xdna1; return ;;
+    esac
+  done
+  echo none
+}
+
+packages_missing() {
+  local pkg missing=()
+  for pkg in "${PACKAGES[@]}"; do
+    pacman -Q "$pkg" &>/dev/null || missing+=("$pkg")
+  done
+  echo "${missing[*]}"
+}
+
+server_up() {
+  [[ $(curl -s -m 2 -o /dev/null -w '%{http_code}' "$URL/api/version" 2>/dev/null) == 200 ]]
+}
+
+wait_for_server() {
+  local i
+  for i in $(seq 1 60); do server_up && return 0; sleep 1; done
+  return 1
+}
+
+voxtype_backend() {
+  [[ -f $VOXTYPE_CONFIG ]] || { echo "-"; return; }
+  awk '/^\[/{s=($0=="[whisper]")} s && /^[[:space:]]*backend[[:space:]]*=/{gsub(/.*=[[:space:]]*"|".*/,""); print; f=1; exit} END{if(!f) print "local"}' "$VOXTYPE_CONFIG"
+}
+
+# Sets key = "value" pairs inside [whisper] of the Voxtype config, replacing
+# existing keys and inserting missing ones at the end of the section.
+voxtype_set() {
+  python3 - "$VOXTYPE_CONFIG" "$@" <<'PY'
+import re, sys
+path, pairs = sys.argv[1], sys.argv[2:]
+want = dict(p.split("=", 1) for p in pairs)
+fmt = lambda k, v: f'{k} = {v}' if v.lstrip('-').isdigit() else f'{k} = "{v}"'
+lines = open(path).read().splitlines()
+out, in_whisper, seen, found_section = [], False, set(), False
+def flush():
+    for k, v in want.items():
+        if k not in seen:
+            out.append(fmt(k, v))
+            seen.add(k)
+for line in lines:
+    header = re.match(r'^\s*\[([^\]]+)\]', line)
+    if header:
+        if in_whisper:
+            flush()
+        in_whisper = header.group(1).strip() == "whisper"
+        found_section = found_section or in_whisper
+    elif in_whisper:
+        m = re.match(r'^\s*([A-Za-z_]+)\s*=', line)
+        if m and m.group(1) in want:
+            line = fmt(m.group(1), want[m.group(1)])
+            seen.add(m.group(1))
+    out.append(line)
+if in_whisper:
+    flush()
+if not found_section:
+    out += ["", "[whisper]"]
+    flush()
+open(path, "w").write("\n".join(out) + "\n")
+PY
+}
+
+backup() { cp -a "$1" "$1.bak.$(date +%s)"; }
+
+# Point Voxtype at the NPU ("remote") or its CPU model ("local"). Backs up and
+# restarts Voxtype only when the value actually changes.
+voxtype_use() {
+  [[ -f $VOXTYPE_CONFIG ]] || return 0
+  [[ $(voxtype_backend) == "$1" ]] && return 0
+  backup "$VOXTYPE_CONFIG"
+  if [[ $1 == remote ]]; then
+    voxtype_set backend=remote remote_endpoint="$URL" remote_model="$WHISPER" remote_timeout_secs=60
+  else
+    voxtype_set backend=local
+  fi
+  systemctl --user restart voxtype.service 2>/dev/null || true
+}
+
+# --- server settings (server.env) ------------------------------------------
+
+env_get() {
+  local val=""
+  [[ -f $SERVER_ENV ]] && val=$(grep -m1 "^$1=" "$SERVER_ENV" | cut -d= -f2- || true)
+  echo "${val:-$2}"
+}
+
+# env_write <llm> <asr 0|1> <ctx>
+env_write() {
+  mkdir -p "$STATE_DIR"
+  printf '# Written by amd-npu. FLM_LLM empty = Whisper only; FLM_ASR=0 = LLM has the NPU alone.\nFLM_LLM=%s\nFLM_ASR=%s\nFLM_CTX=%s\n' "$1" "$2" "$3" >"$SERVER_ENV"
+}
+
+# whisper | share | exclusive, from the saved settings
+mode() {
+  local llm; llm=$(env_get FLM_LLM "")
+  if [[ -z $llm ]]; then echo whisper
+  elif [[ $(env_get FLM_ASR 1) == 0 ]]; then echo exclusive
+  else echo share; fi
+}
+
+restart_server() {
+  systemctl --user daemon-reload
+  systemctl --user restart "$UNIT"
+  wait_for_server || die "The NPU server didn't come up (journalctl --user -u $UNIT)."
+}
+
+# --- models -----------------------------------------------------------------
+
+# LLMs only: Whisper and the embedding model are left out.
+models_json() {
+  flm list --json 2>/dev/null | jq -c '[.models[]
+    | select(((.label // []) | index("embeddings") or index("realtime-transcription")) | not)
+    | {name, installed, footprint, ctx: .default_context_length,
+       params: .details.parameter_size, quant: .details.quantization_level,
+       think: (.details.think // false), labels: (.label // [])}]'
+}
+
+model_info() { models_json | jq -c --arg m "$1" '.[] | select(.name == $m)'; }
+
+loaded_llm() {
+  local ps; ps=$(curl -s -m 3 "$URL/api/ps" 2>/dev/null || true)
+  jq -r '.models[0].name // empty' <<<"$ps" 2>/dev/null | grep -v '^model-faker$' || true
+}
+
+server_pid() {
+  local pid; pid=$(systemctl --user show -p MainPID --value "$UNIT" 2>/dev/null || echo 0)
+  [[ $pid =~ ^[0-9]+$ && $pid != 0 && -r /proc/$pid/status ]] && echo "$pid" || echo 0
+}
+
+# Ordinary process memory. The NPU's model buffers are not included here.
+server_rss_mb() {
+  local pid; pid=$(server_pid)
+  [[ $pid != 0 ]] || { echo 0; return; }
+  awk '/VmRSS/{printf "%d", $2/1024}' "/proc/$pid/status"
+}
+
+# Memory held in NPU buffers (weights, KV cache), from the accel device's fdinfo.
+server_npu_mb() {
+  local pid; pid=$(server_pid)
+  [[ $pid != 0 ]] || { echo 0; return; }
+  cat /proc/"$pid"/fdinfo/* 2>/dev/null | awk '/^drm-total-memory:/{kb+=$2} END{printf "%d", kb/1024}'
+}
+
+# Loads (or swaps to) a model on the running server with a 1-token request.
+warm_llm() {
+  local code
+  code=$(curl -s -m 300 -o /dev/null -w '%{http_code}' "$URL/v1/chat/completions" -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg m "$1" '{model: $m, messages: [{role: "user", content: "hi"}], max_tokens: 1}')" || true)
+  [[ $code == 200 ]]
+}
+
+require_downloaded_llm() {
+  local info; info=$(model_info "$1")
+  [[ -n $info ]] || die "'$1' isn't an NPU LLM FastFlowLM knows. See: amd-npu models"
+  [[ $(jq -r .installed <<<"$info") == true ]] || die "'$1' isn't downloaded. Run: amd-npu pull $1"
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_check() {
+  local gen fail=0
+  step "Hardware"
+  gen=$(npu_generation)
+  case $gen in
+    xdna2) ok "AMD XDNA2 NPU found (Strix / Krackan / Strix Halo / Gorgon Point)" ;;
+    xdna1) bad "AMD XDNA1 NPU (Phoenix / Hawk Point): FastFlowLM needs XDNA2"; fail=1 ;;
+    *) bad "No AMD NPU found"; fail=1 ;;
+  esac
+  if compgen -G "/dev/accel/accel*" >/dev/null; then ok "NPU device node present ($(ls /dev/accel | head -1))"; else bad "No /dev/accel device"; fail=1; fi
+  if [[ -d /sys/module/amdxdna ]]; then ok "amdxdna kernel driver loaded"; else bad "amdxdna driver not loaded (kernel 6.14+ has it in-tree)"; fail=1; fi
+
+  step "Software"
+  local missing; missing=$(packages_missing)
+  if [[ -z $missing ]]; then ok "Packages installed: ${PACKAGES[*]}"; else note "Not installed yet: $missing  (run: amd-npu install)"; fi
+  if [[ $(ulimit -l) == unlimited ]]; then ok "Memlock limit unlimited"; else note "Memlock limit is $(ulimit -l) KiB (install sets it; reboot after)"; fi
+  if command -v voxtype >/dev/null; then ok "Voxtype installed"; else note "Voxtype not installed (omarchy voxtype install) - the NPU server still works on its own"; fi
+  return $fail
+}
+
+cmd_install() {
+  cmd_check || die "This machine doesn't have a supported XDNA2 NPU."
+  step "Install"
+  echo "  This will (with sudo):"
+  echo "   - install ${PACKAGES[*]} from the Arch repos"
+  echo "   - allow unlimited locked memory for your user session (the NPU runtime needs it)"
+  confirm "Continue?" || exit 1
+
+  if command -v omarchy-pkg-add >/dev/null; then
+    omarchy-pkg-add "${PACKAGES[@]}"
+  else
+    sudo pacman -S --needed "${PACKAGES[@]}"
+  fi
+
+  sudo mkdir -p "$(dirname "$MEMLOCK_USER_AT")" "$(dirname "$MEMLOCK_USER_CONF")" "$(dirname "$MEMLOCK_LIMITS")"
+  printf '[Service]\nLimitMEMLOCK=infinity\n' | sudo tee "$MEMLOCK_USER_AT" >/dev/null
+  printf '[Manager]\nDefaultLimitMEMLOCK=infinity\n' | sudo tee "$MEMLOCK_USER_CONF" >/dev/null
+  printf '%s soft memlock unlimited\n%s hard memlock unlimited\n' "$USER" "$USER" | sudo tee "$MEMLOCK_LIMITS" >/dev/null
+  ok "Packages installed and memlock drop-ins written"
+
+  echo
+  echo "Reboot, then run: amd-npu enable"
+}
+
+# Replaces the 0.1 service (flm-asr.service) with amd-npu.service.
+migrate_legacy_unit() {
+  local legacy="$CONFIG_HOME/systemd/user/$LEGACY_UNIT"
+  [[ -f $legacy ]] || return 0
+  systemctl --user disable --now "$LEGACY_UNIT" >/dev/null 2>&1 || true
+  mv "$legacy" "$legacy.bak.$(date +%s)"
+  note "Replaced $LEGACY_UNIT with $UNIT (old unit kept as a .bak)"
+}
+
+cmd_enable() {
+  cmd_check >/dev/null || die "No supported XDNA2 NPU (run: amd-npu check)."
+  [[ -z $(packages_missing) ]] || die "Packages missing (run: amd-npu install)."
+
+  step "Validate the NPU stack"
+  local validation
+  validation=$(flm validate 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+  grep -q 'Memlock Limit: infinity' <<<"$validation" || die "Memlock is not unlimited yet. Reboot after 'amd-npu install'."
+  grep -q 'NPU FW Version' <<<"$validation" || { echo "$validation"; die "flm validate failed."; }
+  ok "$(grep -o 'NPU FW Version: .*' <<<"$validation")"
+
+  step "Whisper model"
+  if [[ -d $WHISPER_DIR ]]; then ok "$WHISPER already downloaded"; else flm pull "$WHISPER"; fi
+
+  step "Service"
+  migrate_legacy_unit
+  # Dictation needs Whisper on the NPU: an exclusive LLM becomes shared.
+  if [[ ! -f $SERVER_ENV ]]; then env_write "" 1 -1
+  elif [[ $(env_get FLM_ASR 1) == 0 ]]; then env_write "$(env_get FLM_LLM "")" 1 "$(env_get FLM_CTX -1)"; fi
+  mkdir -p "$(dirname "$UNIT_FILE")"
+  if [[ -f $UNIT_FILE ]] && ! cmp -s "$UNIT_FILE" "$ROOT/systemd/$UNIT"; then
+    backup "$UNIT_FILE"
+    note "Updated $UNIT (backup kept next to it)"
+  fi
+  cp "$ROOT/systemd/$UNIT" "$UNIT_FILE"
+  systemctl --user daemon-reload
+  systemctl --user enable "$UNIT" >/dev/null 2>&1
+  restart_server
+  ok "$UNIT running on $URL ($(mode))"
+
+  step "Voxtype"
+  if [[ -f $VOXTYPE_CONFIG ]]; then
+    local before; before=$(voxtype_backend)
+    voxtype_use remote
+    if [[ $before == remote ]]; then ok "Already pointed at the NPU"; else ok "Dictation now transcribes on the NPU (config backed up)"; fi
+  else
+    note "Voxtype isn't set up. Run 'omarchy voxtype install', then 'amd-npu enable' again."
+  fi
+
+  refresh_widget
+  echo
+  echo "Done. Hold F9 (or Super+Ctrl+X) to dictate."
+}
+
+cmd_status_json() {
+  local service=inactive server=false whisper_dl=false llm="" llm_info="null"
+  systemctl --user is-active --quiet "$UNIT" && service=active
+  [[ -f $UNIT_FILE ]] || service=missing
+  server_up && server=true
+  [[ -d $WHISPER_DIR ]] && whisper_dl=true
+  [[ $server == true ]] && llm=$(loaded_llm)
+  [[ -n $llm ]] && llm_info=$(model_info "$llm")
+  [[ -z $llm_info ]] && llm_info="null"
+  jq -nc \
+    --arg service "$service" --argjson server "$server" --argjson model "$whisper_dl" \
+    --arg firmware "$(npu_firmware)" --arg backend "$(voxtype_backend)" \
+    --arg last "$(last_latency)" --arg modelName "$WHISPER" --arg url "$URL" \
+    --arg mode "$(mode)" --arg llm "$llm" --argjson llmInfo "$llm_info" \
+    --argjson rss "$(server_rss_mb)" --argjson npuMb "$(server_npu_mb)" --argjson ctx "$(env_get FLM_CTX -1)" \
+    --argjson models "$(models_json | jq -c '[.[] | select(.installed) | {name, params, footprint}]')" \
+    '{service: $service, server: $server, model: $model, modelName: $modelName, url: $url,
+      firmware: $firmware, backend: $backend, last: $last, mode: $mode, rssMb: $rss, npuMb: $npuMb,
+      llm: (if $llm == "" then null else ($llmInfo + {name: $llm, ctxSetting: $ctx}) end),
+      downloaded: $models}'
+}
+
+last_latency() {
+  journalctl --user -u voxtype.service --no-pager -n 200 2>/dev/null | grep -oP 'Remote transcription completed in \K[0-9.]+s' | tail -1 || true
+}
+
+npu_firmware() {
+  command -v xrt-smi >/dev/null || return 0
+  xrt-smi examine 2>/dev/null | grep -oP 'NPU Firmware Version\s*:\s*\K\S+' || true
+}
+
+cmd_status() {
+  [[ ${1:-} == --json ]] && { cmd_status_json; return; }
+  local ready=0
+  step "AMD NPU status"
+  if systemctl --user is-active --quiet "$UNIT"; then ok "$UNIT active"; else bad "$UNIT not running"; ready=1; fi
+  if server_up; then ok "Server answering on $URL"; else bad "Server not answering on $URL"; ready=1; fi
+  if [[ -d $WHISPER_DIR ]]; then ok "Whisper model $WHISPER present"; else bad "Whisper model $WHISPER not downloaded"; ready=1; fi
+  local fw; fw=$(npu_firmware)
+  [[ -n $fw ]] && ok "NPU firmware $fw"
+  case $(voxtype_backend) in
+    remote) ok "Voxtype dictates on the NPU" ;;
+    -) note "Voxtype not set up" ;;
+    *) note "Voxtype dictates on its CPU model"; [[ $(mode) == exclusive ]] || ready=1 ;;
+  esac
+  local last; last=$(last_latency)
+  [[ -n $last ]] && ok "Last dictation transcribed in $last"
+
+  step "Local model"
+  local llm=""
+  server_up && llm=$(loaded_llm)
+  if [[ -n $llm ]]; then
+    local info; info=$(model_info "$llm")
+    ok "$llm loaded ($(jq -r '"\(.params) \(.quant), ~\(.footprint) GB"' <<<"$info"))"
+    case $(mode) in
+      exclusive) note "NPU only: dictation is on the CPU until 'amd-npu unload'" ;;
+      *) ok "Sharing the NPU with Whisper (dictation waits while the LLM is answering)" ;;
+    esac
+    ok "API: $URL/v1 (OpenAI) and $URL/api (Ollama)"
+    ok "Memory: $(server_npu_mb) MB in NPU buffers + $(server_rss_mb) MB process"
+  else
+    note "No LLM loaded (amd-npu load <model>)"
+  fi
+  return $ready
+}
+
+# Quiet live check of Whisper: prints "ok <seconds>" or "fail <http code>".
+cmd_ping() {
+  local wav body code
+  wav=$(mktemp --suffix=.wav) body=$(mktemp)
+  python3 -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0'*16000); w.close()" "$wav"
+  code=$(curl -s -m 60 -o "$body" -w '%{http_code} %{time_total}' "$URL/v1/audio/transcriptions" -F "file=@$wav" -F "model=$WHISPER" || true)
+  # With Whisper off the server still answers 200, with a body of `null`.
+  if [[ ${code%% *} == 200 ]] && jq -e 'type == "object" and has("text")' "$body" >/dev/null 2>&1; then
+    echo "ok ${code#* }"
+  else
+    [[ ${code%% *} == 200 ]] && echo "fail no-whisper" || echo "fail ${code%% *}"
+    rm -f "$wav" "$body"
+    return 1
+  fi
+  rm -f "$wav" "$body"
+}
+
+cmd_doctor() {
+  cmd_check || true
+  cmd_status || true
+  step "Live request"
+  if [[ $(mode) == exclusive ]]; then note "Whisper is off while an LLM has the NPU alone"; return 0; fi
+  local result; result=$(cmd_ping || true)
+  if [[ $result == ok* ]]; then ok "Transcription endpoint OK (1 s of silence in ${result#ok }s)"; else bad "Transcription request failed (HTTP ${result#fail })"; return 1; fi
+}
+
+cmd_models() {
+  local json; json=$(models_json)
+  if [[ ${1:-} == --json ]]; then echo "$json"; return; fi
+  printf '\n  %-22s %-7s %-6s %8s  %s\n' MODEL PARAMS QUANT MEMORY DOWNLOADED
+  jq -r '.[] | [.name, .params, .quant, "\(.footprint) GB", (if .installed then "yes" else "" end)] | @tsv' <<<"$json" |
+    while IFS=$'\t' read -r n p q f i; do printf '  %-22s %-7s %-6s %8s  %s\n' "$n" "$p" "$q" "$f" "$i"; done
+  echo
+  echo "  Download with: amd-npu pull <model>    Load with: amd-npu load <model> [--exclusive]"
+}
+
+cmd_pull() {
+  local m=${1:-}; [[ -n $m ]] || die "Usage: amd-npu pull <model>"
+  local info; info=$(model_info "$m")
+  [[ -n $info ]] || die "'$m' isn't an NPU LLM FastFlowLM knows. See: amd-npu models"
+  if [[ $(jq -r .installed <<<"$info") == true ]]; then ok "$m is already downloaded"; return; fi
+  confirm "Download $m (~$(jq -r .footprint <<<"$info") GB in memory once loaded)?" || exit 1
+  flm pull "$m"
+  refresh_widget
+}
+
+cmd_load() {
+  local m="" exclusive=0 ctx
+  ctx=$(env_get FLM_CTX -1)
+  while (($#)); do
+    case $1 in
+      --exclusive) exclusive=1 ;;
+      --share) exclusive=0 ;;
+      --ctx) ctx=${2:?--ctx needs a value}; shift ;;
+      -y | --yes) YES=1 ;;
+      -*) die "Unknown option $1" ;;
+      *) m=$1 ;;
+    esac
+    shift
+  done
+  [[ -n $m ]] || die "Usage: amd-npu load <model> [--exclusive] [--ctx N]"
+  require_downloaded_llm "$m"
+  local prev prev_ctx
+  prev=$(mode)
+  prev_ctx=$(env_get FLM_CTX -1)
+
+  if (( exclusive )); then
+    step "Load $m on the NPU alone"
+    echo "  While $m has the NPU, dictation uses Voxtype's CPU model (lower accuracy)."
+    echo "  Run 'amd-npu unload' (or use the bar card) to bring Whisper back."
+    confirm "Continue?" || exit 1
+    env_write "$m" 0 "$ctx"
+    restart_server
+    voxtype_use local
+    ok "$m has the NPU; dictation is on the CPU"
+    notify "Dictation is on the CPU" "$m is using the NPU. Unload it to bring Whisper back."
+  else
+    step "Load $m next to Whisper"
+    env_write "$m" 1 "$ctx"
+    # Live swap when the running server already has Whisper and the same context
+    # setting; otherwise restart it with the new settings.
+    if [[ $prev != exclusive && $ctx == "$prev_ctx" ]] && systemctl --user is-active --quiet "$UNIT" && server_up && warm_llm "$m"; then
+      ok "Swapped to $m without restarting Whisper"
+    else
+      restart_server
+      warm_llm "$m" || die "$m failed to load (journalctl --user -u $UNIT)."
+      ok "$m loaded"
+    fi
+    # A failed or odd load can reset the NPU device and take Whisper with it.
+    if ! cmd_ping >/dev/null; then
+      note "Whisper stopped answering; restarting the server"
+      restart_server
+      cmd_ping >/dev/null || die "Whisper didn't come back (journalctl --user -u $UNIT)."
+    fi
+    ok "Whisper still answering"
+    if [[ $prev == exclusive ]]; then
+      voxtype_use remote
+      notify "Dictation is back on the NPU" "$m now shares the NPU with Whisper."
+    fi
+  fi
+  refresh_widget
+  echo
+  echo "API: $URL/v1 (model \"$m\")   Chat: amd-npu chat"
+}
+
+cmd_unload() {
+  local prev; prev=$(mode)
+  step "Unload the local model"
+  env_write "" 1 -1
+  if systemctl --user is-enabled --quiet "$UNIT" 2>/dev/null || systemctl --user is-active --quiet "$UNIT"; then
+    restart_server
+    ok "Whisper only on the NPU"
+  fi
+  if [[ $prev == exclusive ]]; then
+    voxtype_use remote
+    ok "Dictation back on the NPU"
+    notify "Dictation is back on the NPU" "The local model was unloaded; Whisper has the NPU again."
+  fi
+  refresh_widget
+}
+
+cmd_chat() {
+  local m=${1:-} think=0
+  [[ ${2:-} == --think || ${1:-} == --think ]] && think=1
+  [[ $m == --think ]] && m=""
+  server_up || die "The NPU server isn't running (amd-npu enable)."
+  [[ -n $m ]] || m=$(loaded_llm)
+  [[ -n $m ]] || die "No model loaded. Load one first (amd-npu load <model>) or name it: amd-npu chat <model>"
+  require_downloaded_llm "$m"
+  [[ $m == "$(loaded_llm)" ]] || cmd_load "$m" >/dev/null
+  python3 "$ROOT/lib/chat.py" "$URL" "$m" "$think"
+}
+
+# Measures the loaded LLM: prints human text, or "ok <prefill> <decode> <tokens>" with --raw.
+cmd_bench_llm() {
+  local m; m=$(loaded_llm)
+  [[ -n $m ]] || { [[ ${1:-} == --raw ]] && echo "fail none" && return 1; die "No model loaded."; }
+  local resp
+  resp=$(curl -s -m 300 "$URL/v1/chat/completions" -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg m "$m" '{model: $m, max_tokens: 200, chat_template_kwargs: {enable_thinking: false},
+          messages: [{role: "user", content: "In about 150 words, explain what a neural processing unit is."}]}')" || true)
+  local prefill decode tokens
+  prefill=$(jq -r '.usage.prefill_speed_tps // empty' <<<"$resp" 2>/dev/null || true)
+  decode=$(jq -r '.usage.decoding_speed_tps // empty' <<<"$resp" 2>/dev/null || true)
+  tokens=$(jq -r '.usage.completion_tokens // empty' <<<"$resp" 2>/dev/null || true)
+  if [[ -z $decode ]]; then [[ ${1:-} == --raw ]] && echo "fail request" && return 1; die "Benchmark request failed."; fi
+  if [[ ${1:-} == --raw ]]; then
+    printf 'ok %.1f %.1f %s\n' "$prefill" "$decode" "$tokens"
+  else
+    ok "$m: generation $(printf '%.1f' "$decode") tok/s, prompt $(printf '%.0f' "$prefill") tok/s ($tokens tokens)"
+  fi
+}
+
+cmd_disable() {
+  step "Disable the NPU server"
+  voxtype_use local
+  ok "Voxtype back on its local model"
+  systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
+  ok "$UNIT stopped; the NPU is free"
+  refresh_widget
+}
+
+cmd_remove() {
+  cmd_disable
+  step "Remove"
+  rm -f "$UNIT_FILE"
+  systemctl --user daemon-reload
+  ok "Removed $UNIT"
+  if [[ -d $WHISPER_DIR ]] && confirm "Delete the Whisper model ($(du -sh "$WHISPER_DIR" | cut -f1))?"; then
+    rm -rf "$WHISPER_DIR"
+    ok "Whisper model deleted"
+  fi
+  if confirm "Delete downloaded LLMs and settings (~/.config/flm/models, $STATE_DIR)?"; then
+    rm -rf "$CONFIG_HOME/flm/models" "$STATE_DIR"
+    ok "Models and settings deleted"
+  fi
+  if confirm "Also uninstall ${PACKAGES[*]} and the memlock drop-ins (sudo)?"; then
+    sudo pacman -Rns "${PACKAGES[@]}" || true
+    sudo rm -f "$MEMLOCK_USER_AT" "$MEMLOCK_USER_CONF" "$MEMLOCK_LIMITS"
+    ok "Packages and drop-ins removed (reboot to reset the memlock limit)"
+  fi
+  refresh_widget
+}
+
+cmd_help() {
+  cat <<EOF
+amd-npu $VERSION - dictation and small local LLMs on the AMD XDNA2 NPU
+
+Setup
+  check                 Is this machine supported? What's installed?
+  install               NPU runtime + FastFlowLM + memlock limit (sudo, then reboot)
+  enable                Download Whisper, start the NPU server, point Voxtype at it
+  disable / remove      Stop (Voxtype back on its CPU model) / uninstall
+
+Dictation
+  status [--json]       What's running on the NPU
+  doctor                status + a live transcription request
+  ping                  Quiet Whisper check: "ok <seconds>" or "fail <code>"
+
+Local models
+  models [--json]       NPU LLMs FastFlowLM offers, and which are downloaded
+  pull <model>          Download a model
+  load <model>          Load next to Whisper (dictation keeps working; it waits while
+                        the LLM is answering)
+  load <model> --exclusive
+                        Give the LLM the NPU alone; dictation falls back to the CPU model
+  unload                Drop the LLM; Whisper-only again (and back on the NPU)
+  chat [model] [--think]
+                        Chat in the terminal with the loaded model
+  bench-llm [--raw]     Measure the loaded model's generation speed
+
+API while a model is loaded: $URL/v1 (OpenAI) and $URL/api (Ollama)
+EOF
+}
+
+case ${1:-help} in
+  check | install | enable | status | doctor | ping | models | pull | load | unload | chat | disable | remove | help) cmd="cmd_$1"; shift; "$cmd" "$@" ;;
+  bench-llm) shift; cmd_bench_llm "$@" ;;
+  -h | --help) cmd_help ;;
+  -v | --version) echo "$VERSION" ;;
+  *) cmd_help; exit 1 ;;
+esac
