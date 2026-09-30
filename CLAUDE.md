@@ -37,6 +37,9 @@ update it.
   Hyprland runs under systemd, so PAM limits alone don't reach the service.
 - **Never force NPU firmware or suggest `amdxdna-dkms`** on current kernels.
 - **Only XDNA2 (PCI `1022:17f0`)** is supported; `check` must refuse XDNA1 (`1022:1502`).
+- **Third-party widgets get a restricted bar API** (`PluginBarApi`: `run`, tooltips, popouts,
+  `moduleWidgets`), with **no `shellQuote`**. Quote shell arguments locally (`quote()` in
+  `Widget.qml`). Check `journalctl --user | grep omarchy-shell` for `TypeError` after any widget change.
 - The icon is written as an ASCII escape (`󰘚`, nf-md-chip). Keep `Widget.qml` ASCII.
 - **Never `pkill -f` a pattern that appears in your own command line.**
 

@@ -24,13 +24,19 @@ BarWidget {
     if (!probeProc.running) probeProc.running = true
   }
 
+  // The bar API handed to third-party plugins has run() but not shellQuote(),
+  // so quote locally.
+  function quote(value) {
+    return "'" + String(value).replace(/'/g, "'\\''") + "'"
+  }
+
   function activate() {
     if (!root.bar) return
     if (status === "stopped") {
       root.bar.run("systemctl --user start flm-asr.service")
       restartCheck.restart()
     } else {
-      root.bar.run("omarchy-launch-floating-terminal-with-presentation " + root.bar.shellQuote(cli + " status"))
+      root.bar.run("omarchy-launch-floating-terminal-with-presentation " + quote(cli) + " status")
     }
   }
 
