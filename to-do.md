@@ -7,6 +7,14 @@
 - [ ] Screenshots of the widget states for the README.
 - [ ] Decide whether the plugin id keeps the `alanroman117.` prefix.
 
+## Private-repo install (verified 2026-09-30)
+- `omarchy plugin add https://github.com/AlanRoman117/omarchy-npu-dictation.git --enable --yes`
+  works on the Z13 while the repo is private. `git clone` authenticates through the `gh auth
+  git-credential` helper, and Omarchy's installer disables password prompts.
+- [ ] The helper in `~/.gitconfig` points at a versioned mise path
+      (`.../mise/installs/gh/2.100.0/...`). After a `gh` upgrade, run `gh auth setup-git` again or
+      private installs and updates will fail.
+
 ## Upstream idea (after it's public)
 - [ ] Post to Omarchy Discussions → Suggestions: an NPU option in `omarchy voxtype install`,
       plus an `omarchy-hw-amd-npu` detection helper. Link this repo as the working proof, with the
