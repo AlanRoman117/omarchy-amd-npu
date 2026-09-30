@@ -4,39 +4,52 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// NPU dictation: bar icon plus a popup card in the style of Omarchy's own
-// panels (power, network, bluetooth). The card shows whether Voxtype
-// dictation runs on the NPU Whisper server, lets you switch it on or off, and
-// runs a live test. Recording/transcribing state stays with Omarchy's
-// built-in Dictation indicator.
+// AMD NPU: bar icon plus a popup card in the style of Omarchy's own panels
+// (power, network, bluetooth). The card covers Voxtype dictation on the NPU
+// (Whisper) and small local LLMs: load one next to Whisper or give it the
+// NPU alone, see what's loaded, test it, unload it. Recording/transcribing
+// state stays with Omarchy's built-in Dictation indicator.
 Panel {
   id: root
-  moduleName: "alanroman117.npu-dictation"
-  ipcTarget: "alanroman117.npu-dictation"
+  moduleName: "alanroman117.amd-npu"
+  ipcTarget: "alanroman117.amd-npu"
   // Own the IPC target so it can also carry refresh().
   manageIpc: false
 
   // Bar icon state: "ready" (service active and answering), "stopped", or
   // "absent" (not set up, widget hidden).
   property string status: "absent"
-  // Popup details, from `npu-dictation status --json`.
+  // Card details, from `amd-npu status --json`.
   property var info: ({})
-  property bool switching: false
-  property bool testing: false
-  property string testResult: ""
+  // "", "switch", "load", "unload", "share"
+  property string busy: ""
+  property bool testingNpu: false
+  property bool testingLlm: false
+  property string npuTest: ""
+  property string llmTest: ""
   property string actionError: ""
+  property string selectedModel: ""
+  property bool loadExclusive: false
+  property bool confirming: false
 
-  readonly property string cli: Qt.resolvedUrl("bin/npu-dictation").toString().replace("file://", "")
-  readonly property bool onNpu: info.backend === "remote" && info.service === "active"
-  readonly property string probe: "systemctl --user cat flm-asr.service >/dev/null 2>&1 || { echo absent; exit; }; " +
-    "if systemctl --user is-active --quiet flm-asr.service && " +
-    "[ \"$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:52625/)\" != 000 ]; " +
+  readonly property string cli: Qt.resolvedUrl("bin/amd-npu").toString().replace("file://", "")
+  readonly property var llm: info.llm || null
+  readonly property var downloaded: info.downloaded || []
+  readonly property bool exclusive: info.mode === "exclusive"
+  readonly property bool onNpu: info.backend === "remote" && info.service === "active" && !exclusive
+  readonly property string probe: "systemctl --user cat amd-npu.service >/dev/null 2>&1 || { echo absent; exit; }; " +
+    "if systemctl --user is-active --quiet amd-npu.service && " +
+    "[ \"$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:52625/api/version)\" = 200 ]; " +
     "then echo ready; else echo stopped; fi"
 
   // The bar API handed to third-party plugins has run() but not shellQuote(),
   // so quote locally.
   function quote(value) {
     return "'" + String(value).replace(/'/g, "'\\''") + "'"
+  }
+
+  function gb(mb) {
+    return (Number(mb || 0) / 1024).toFixed(1) + " GB"
   }
 
   function refresh() {
@@ -52,20 +65,43 @@ Panel {
     }
   }
 
-  function setNpu(on) {
-    if (switching) return
-    switching = true
+  function runAction(kind, args) {
+    if (busy !== "") return
+    busy = kind
     actionError = ""
-    testResult = ""
-    switchProc.command = [cli, on ? "enable" : "disable"]
-    switchProc.running = true
+    npuTest = ""
+    llmTest = ""
+    actionProc.command = [cli].concat(args)
+    actionProc.running = true
   }
 
-  function runTest() {
-    if (testing) return
-    testing = true
-    testResult = ""
-    testProc.running = true
+  function toggleDictation() {
+    if (exclusive && llm) runAction("share", ["load", llm.name, "--share"])
+    else runAction("switch", [onNpu ? "disable" : "enable"])
+  }
+
+  function requestLoad() {
+    if (selectedModel === "") return
+    if (loadExclusive && !confirming) {
+      confirming = true
+      return
+    }
+    confirming = false
+    runAction("load", loadExclusive ? ["load", selectedModel, "--exclusive", "--yes"] : ["load", selectedModel])
+  }
+
+  function testNpu() {
+    if (testingNpu) return
+    testingNpu = true
+    npuTest = ""
+    pingProc.running = true
+  }
+
+  function testLlm() {
+    if (testingLlm) return
+    testingLlm = true
+    llmTest = ""
+    benchProc.running = true
   }
 
   function openFullStatus() {
@@ -75,20 +111,32 @@ Panel {
   }
 
   function statusCaption() {
-    if (switching) return onNpu ? "STOPPING..." : "STARTING..."
-    if (status === "ready" && info.backend === "remote") return "READY"
-    if (status === "ready") return "LOCAL MODEL"
-    return "STOPPED"
+    if (busy === "load") return "LOADING MODEL..."
+    if (busy === "unload") return "UNLOADING..."
+    if (busy === "share" || busy === "switch") return "SWITCHING..."
+    if (status !== "ready") return "STOPPED"
+    if (exclusive) return "LLM ONLY"
+    if (llm && info.backend === "remote") return "READY + LLM"
+    if (info.backend === "remote") return "READY"
+    return "LOCAL MODEL"
+  }
+
+  function dictationSubtitle() {
+    if (actionError !== "") return actionError
+    if (exclusive) return "Off: the LLM has the NPU, dictation uses the CPU"
+    if (onNpu && llm) return "On the NPU; waits while the LLM is answering"
+    if (onNpu) return "Voxtype sends audio to the NPU"
+    return "Off: Voxtype uses its local model, NPU free"
   }
 
   function backendText() {
     if (info.backend === "remote") return "NPU"
     if (info.backend === "-" || info.backend === undefined) return "not set up"
-    return "local model"
+    return "CPU model"
   }
 
   IpcHandler {
-    target: "alanroman117.npu-dictation"
+    target: "alanroman117.amd-npu"
 
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -100,10 +148,17 @@ Panel {
 
   onOpenedChanged: {
     if (opened) {
-      testResult = ""
+      npuTest = ""
+      llmTest = ""
       actionError = ""
+      confirming = false
       refresh()
     }
+  }
+
+  onDownloadedChanged: {
+    var names = downloaded.map(function(m) { return m.name })
+    if (names.indexOf(selectedModel) < 0) selectedModel = names.length > 0 ? names[0] : ""
   }
 
   visible: status !== "absent"
@@ -133,16 +188,16 @@ Panel {
   }
 
   Process {
-    id: switchProc
+    id: actionProc
     stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector {
-      id: switchErr
+      id: actionErr
       waitForEnd: true
     }
     onExited: function(exitCode) {
-      root.switching = false
+      root.busy = ""
       if (exitCode !== 0) {
-        var lines = String(switchErr.text || "").trim().split("\n")
+        var lines = String(actionErr.text || "").trim().split("\n")
         root.actionError = (lines[lines.length - 1] || "Failed").replace(/\u001b\[[0-9;]*m/g, "").replace(/^Error:\s*/, "")
       }
       root.refreshAll()
@@ -150,22 +205,38 @@ Panel {
   }
 
   Process {
-    id: testProc
+    id: pingProc
     command: [root.cli, "ping"]
     stdout: StdioCollector {
-      id: testOut
+      id: pingOut
       waitForEnd: true
     }
     onExited: function(exitCode) {
-      root.testing = false
-      var parts = String(testOut.text || "").trim().split(" ")
-      root.testResult = parts[0] === "ok"
-        ? "Transcription OK in " + parseFloat(parts[1]).toFixed(2) + " s"
-        : "Test failed" + (parts[1] ? " (HTTP " + parts[1] + ")" : "")
+      root.testingNpu = false
+      var parts = String(pingOut.text || "").trim().split(" ")
+      if (parts[0] === "ok") root.npuTest = "Whisper OK in " + parseFloat(parts[1]).toFixed(2) + " s"
+      else if (parts[1] === "no-whisper") root.npuTest = "Whisper is off while the LLM has the NPU"
+      else root.npuTest = "Whisper test failed" + (parts[1] ? " (" + parts[1] + ")" : "")
     }
   }
 
-  // Bar icon: poll at the configured interval. Popup details: every 5 s while open.
+  Process {
+    id: benchProc
+    command: [root.cli, "bench-llm", "--raw"]
+    stdout: StdioCollector {
+      id: benchOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      root.testingLlm = false
+      var parts = String(benchOut.text || "").trim().split(" ")
+      root.llmTest = parts[0] === "ok"
+        ? "Generation " + parseFloat(parts[2]).toFixed(1) + " tok/s (" + parts[3] + " tokens)"
+        : "LLM test failed"
+    }
+  }
+
+  // Bar icon: poll at the configured interval. Card details: every 5 s while open.
   Timer {
     interval: Math.max(5, root.setting("refreshIntervalSec", 15)) * 1000
     running: true
@@ -187,7 +258,9 @@ Panel {
     bar: root.bar
     text: "\udb81\ude1a"
     dimmed: root.status === "stopped"
-    tooltipText: root.opened ? "" : (root.status === "ready" ? "NPU dictation ready" : "NPU Whisper server stopped")
+    tooltipText: root.opened ? "" : (root.status === "ready"
+      ? (root.llm ? "AMD NPU: dictation + " + root.llm.name : "AMD NPU: dictation ready")
+      : "AMD NPU server stopped")
     onPressed: function(b) { root.toggle() }
   }
 
@@ -198,7 +271,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(360))
+    contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
     PanelKeyCatcher {
@@ -241,7 +314,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
-              text: "NPU Dictation"
+              text: "AMD NPU"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.title
@@ -292,7 +365,7 @@ Panel {
 
         PanelSeparator { foreground: root.bar.foreground }
 
-        // ---------- On/off ----------
+        // ---------- Dictation on/off ----------
         Item {
           width: parent.width
           implicitHeight: Math.max(toggleLabels.implicitHeight, npuSwitch.implicitHeight)
@@ -316,9 +389,7 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              text: root.actionError !== ""
-                ? root.actionError
-                : (root.onNpu ? "Voxtype sends audio to the NPU" : "Off: Voxtype uses its local model, NPU free")
+              text: root.dictationSubtitle()
               color: root.actionError !== "" ? Color.urgent : root.bar.foreground
               opacity: root.actionError !== "" ? 1 : 0.6
               font.family: root.bar.fontFamily
@@ -333,9 +404,185 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             checked: root.onNpu
-            busy: root.switching
+            busy: root.busy === "switch" || root.busy === "share"
             foreground: root.bar.foreground
-            onToggled: root.setNpu(!root.onNpu)
+            onToggled: root.toggleDictation()
+          }
+        }
+
+        PanelSeparator { foreground: root.bar.foreground }
+
+        // ---------- Local model ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(8)
+
+          PanelSectionHeader {
+            text: "LOCAL MODEL"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
+
+          // Loaded: details and actions
+          Column {
+            visible: !!root.llm
+            width: parent.width
+            spacing: Style.space(8)
+
+            InfoPair { label: "Model"; value: root.llm ? root.llm.name : "" }
+            InfoPair { label: "Size"; value: root.llm ? root.llm.params + " " + root.llm.quant : "" }
+            InfoPair { label: "Mode"; value: root.exclusive ? "NPU only (dictation on CPU)" : "Shared with Whisper" }
+            InfoPair { label: "Memory"; value: root.gb(root.info.npuMb) + " NPU + " + root.gb(root.info.rssMb) }
+            InfoPair { label: "API"; value: "127.0.0.1:52625/v1" }
+
+            Row {
+              id: llmActions
+              width: parent.width
+              spacing: Style.space(6)
+              readonly property real cellWidth: (width - spacing) / 2
+
+              Button {
+                width: llmActions.cellWidth
+                iconText: "\uf04b"
+                text: root.testingLlm ? "Testing..." : "Test LLM"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                onClicked: root.testLlm()
+              }
+
+              Button {
+                width: llmActions.cellWidth
+                iconText: "\uf00d"
+                text: root.busy === "unload" ? "Unloading..." : "Unload"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                onClicked: root.runAction("unload", ["unload"])
+              }
+            }
+
+            Text {
+              visible: root.llmTest !== ""
+              textFormat: Text.PlainText
+              text: root.llmTest
+              color: root.bar.foreground
+              opacity: 0.8
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+            }
+          }
+
+          // Not loaded, nothing downloaded
+          Text {
+            visible: !root.llm && root.downloaded.length === 0
+            textFormat: Text.PlainText
+            text: "No models downloaded yet. In a terminal: amd-npu models, then amd-npu pull qwen3.5:4b"
+            color: root.bar.foreground
+            opacity: 0.6
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            width: parent.width
+            wrapMode: Text.WordWrap
+          }
+
+          // Not loaded: pick a downloaded model, a mode, then load
+          Column {
+            visible: !root.llm && root.downloaded.length > 0
+            width: parent.width
+            spacing: Style.space(6)
+
+            Repeater {
+              model: root.downloaded
+              Button {
+                required property var modelData
+                width: parent.width
+                leftAlign: true
+                text: modelData.name + "   " + modelData.params + ", ~" + modelData.footprint + " GB"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                active: root.selectedModel === modelData.name
+                onClicked: {
+                  root.selectedModel = modelData.name
+                  root.confirming = false
+                }
+              }
+            }
+
+            Row {
+              id: modeRow
+              width: parent.width
+              spacing: Style.space(6)
+              readonly property real cellWidth: (width - spacing) / 2
+
+              Button {
+                width: modeRow.cellWidth
+                text: "Share with Whisper"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                active: !root.loadExclusive
+                onClicked: { root.loadExclusive = false; root.confirming = false }
+              }
+
+              Button {
+                width: modeRow.cellWidth
+                text: "NPU only"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                active: root.loadExclusive
+                onClicked: { root.loadExclusive = true; root.confirming = false }
+              }
+            }
+
+            Text {
+              visible: root.confirming
+              textFormat: Text.PlainText
+              text: "Dictation will use the CPU model (lower accuracy) until you unload " + root.selectedModel + "."
+              color: Color.urgent
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              width: parent.width
+              wrapMode: Text.WordWrap
+            }
+
+            Row {
+              id: loadRow
+              width: parent.width
+              spacing: Style.space(6)
+              readonly property real cellWidth: (width - spacing) / 2
+
+              Button {
+                visible: root.confirming
+                width: loadRow.cellWidth
+                text: "Cancel"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                onClicked: root.confirming = false
+              }
+
+              Button {
+                width: root.confirming ? loadRow.cellWidth : loadRow.width
+                iconText: "\uf019"
+                text: root.busy === "load" ? "Loading..." : (root.confirming ? "Load anyway" : "Load " + root.selectedModel)
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                onClicked: root.requestLoad()
+              }
+            }
           }
         }
 
@@ -347,18 +594,15 @@ Panel {
           spacing: Style.space(8)
 
           PanelSectionHeader {
-            text: "DETAILS"
+            text: "DICTATION"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
           }
 
-          InfoPair { label: "Model"; value: (root.info.modelName || "whisper-v3:turbo") + (root.info.model === false ? " (not downloaded)" : "") }
+          InfoPair { label: "Whisper"; value: (root.info.modelName || "whisper-v3:turbo") + (root.info.model === false ? " (not downloaded)" : "") }
           InfoPair { label: "NPU firmware"; value: root.info.firmware || "-" }
-          InfoPair { label: "Server"; value: root.info.server ? "up on 127.0.0.1:52625" : "not running" }
-          InfoPair { label: "Voxtype"; value: root.backendText() }
+          InfoPair { label: "Voxtype uses"; value: root.backendText() }
         }
-
-        PanelSeparator { foreground: root.bar.foreground }
 
         // ---------- Actions ----------
         Column {
@@ -373,14 +617,13 @@ Panel {
 
             Button {
               width: actionRow.cellWidth
-              iconText: root.testing ? "\uf021" : "\uf04b"
-              iconSpinning: root.testing
-              text: root.testing ? "Testing..." : "Test NPU"
+              iconText: "\uf130"
+              text: root.testingNpu ? "Testing..." : "Test dictation"
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               bordered: true
-              onClicked: root.runTest()
+              onClicked: root.testNpu()
             }
 
             Button {
@@ -396,10 +639,10 @@ Panel {
           }
 
           Text {
-            visible: root.testResult !== ""
+            visible: root.npuTest !== ""
             textFormat: Text.PlainText
-            text: root.testResult
-            color: root.testResult.indexOf("OK") >= 0 ? root.bar.foreground : Color.urgent
+            text: root.npuTest
+            color: root.npuTest.indexOf("OK") >= 0 ? root.bar.foreground : Color.urgent
             opacity: 0.8
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall

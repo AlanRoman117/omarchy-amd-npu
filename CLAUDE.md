@@ -4,32 +4,61 @@ Context for working on this repository. Read this before changing anything.
 
 ## What this is
 
-An Omarchy shell plugin (bar widget) plus a setup CLI that runs Voxtype dictation on the AMD XDNA2
-NPU through FastFlowLM's Whisper large-v3-turbo server. **Private for now.** Going public, and
-pitching it upstream to Omarchy, are later decisions; see `to-do.md`.
+An Omarchy shell plugin (bar card) plus a CLI that put the AMD XDNA2 NPU to work through
+FastFlowLM: Whisper large-v3-turbo for Voxtype dictation, and optional small local LLMs next to it
+or on their own. **Private for now.** Going public, and pitching it upstream to Omarchy, are later
+decisions; see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 
 | Path | Role |
 |---|---|
-| `manifest.json` | Plugin manifest (`alanroman117.npu-dictation`, `bar-widget`) |
-| `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.npu-dictation`: `open`, `close`, `toggle`, `refresh` |
-| `bin/npu-dictation` | check / install / enable / status (`--json`) / doctor / ping / disable / remove |
-| `systemd/flm-asr.service` | User unit, copied by `enable` |
+| `manifest.json` | Plugin manifest (`alanroman117.amd-npu`, `bar-widget`) |
+| `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.amd-npu`: `open`, `close`, `toggle`, `refresh` |
+| `bin/amd-npu` | Setup, dictation and model commands (`amd-npu help`) |
+| `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin) |
+| `systemd/amd-npu.service` | User unit, copied by `enable`. Reads `~/.config/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`) |
+
+Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LLM + `FLM_ASR=1`),
+**exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `backend = "local"`, notifications both ways).
+
+## FastFlowLM behaviour this relies on (1.0.4, read from `src/server/rest_handler.cpp`)
+
+- One model per type (ASR, LLM, embedding) loaded at once; types coexist, so Whisper stays while
+  LLMs swap.
+- A request naming another LLM swaps it live (`ensure_model_loaded`), and **auto-downloads it if
+  missing**. Never send a model name that isn't downloaded (`require_downloaded_llm`).
+- A failed LLM load resets the NPU device, which can take Whisper with it. `load` pings Whisper
+  afterwards and restarts the service if needed.
+- **The server runs one request at a time.** In share mode, dictation queues behind a running LLM
+  answer (measured: a 2 s clip waited 44 s). `--preemption 1` does not change this.
+- No unload endpoint: unloading restarts the server Whisper-only.
+- **With Whisper off, `/v1/audio/transcriptions` answers HTTP 200 with a body of `null`.** Check
+  the body (`ping` does), not just the status.
+- `/api/ps` returns an error JSON when no LLM is loaded (internal placeholder `model-faker`).
+- Speeds (`prefill_speed_tps`, `decoding_speed_tps`) come back in each response's `usage`, only to
+  the caller.
+- Memory: the process RSS excludes NPU buffers. Those show as `drm-total-memory` in
+  `/proc/<pid>/fdinfo/*`. FastFlowLM's `footprint` understates real use (4B: 5.0 listed vs ~6.1 GB
+  measured system-wide).
 
 ## How it's tested (on the ROG Flow Z13, the only verified machine)
 
-- `bin/npu-dictation check`, `status` and `doctor` must pass.
-- Round trip: `disable` then `enable`. The Voxtype config must come back byte-identical, and a second
-  `enable` must create no files or backups.
-- `voxtype transcribe <16 kHz wav>` must log a request in `journalctl --user -u flm-asr`.
-- Widget: `omarchy plugin validate <dir>`, then **`omarchy restart shell`**. The shell logs
-  "reloading" when a plugin file changes but can keep running the old compiled QML. Open the card
-  with `omarchy-shell alanroman117.npu-dictation open` and screenshot it (`grim -g`). Stop and start `flm-asr`, run
-  `omarchy-shell alanroman117.npu-dictation refresh`, and check the icon dims and brightens.
-- The live mic test (hold F9) needs a human.
+- `bin/amd-npu check`, `status` and `doctor` must pass.
+- Dictation round trip: `disable` then `enable`. The Voxtype config must come back byte-identical,
+  and a second `enable` must create no files or backups.
+- Models: `load` (share) swaps live and Whisper still pings. `load --exclusive --yes` →
+  `voxtype transcribe` logs **no** request in `journalctl --user -u amd-npu`. `unload` → Whisper pings
+  and the Voxtype config is byte-identical again. `bench-llm` and piped `chat` answer.
+- Safety: `load` of a model that isn't downloaded, an unknown name, or `whisper-v3:turbo` must be
+  refused before any request is sent.
+- Card: `omarchy plugin validate <dir>`, then **`omarchy restart shell`**. The shell logs "reloading"
+  when a plugin file changes but can keep running the old compiled QML. Open the card with
+  `omarchy-shell alanroman117.amd-npu open` and screenshot each state (`grim -g`): Whisper only,
+  share, exclusive.
+- Needs a human: live F9 dictation in each mode, and clicking through the card (the NPU-only
+  confirmation row only appears on click).
 
-The installed plugin is a separate copy at `~/.config/omarchy/plugins/alanroman117.npu-dictation/`
-(a git clone once installed with `omarchy plugin add`). Edits here don't reach it until you
-update it.
+The installed plugin is a separate copy at `~/.config/omarchy/plugins/alanroman117.amd-npu/` (a git
+clone once installed with `omarchy plugin add`). Edits here don't reach it until you update it.
 
 ## Rules learned the hard way
 
@@ -43,8 +72,10 @@ update it.
   `moduleWidgets`), with **no `shellQuote`**. Quote shell arguments locally (`quote()` in
   `Widget.qml`). Check `journalctl --user | grep omarchy-shell` for `TypeError` after any widget change.
 - **Keep `Widget.qml` ASCII.** Some editors and tools turn `\uXXXX` escapes into literal glyphs;
-  convert them back before committing (`grep -P '[^\x00-\x7F]' Widget.qml` must find nothing).
-- The icon is written as an ASCII escape (`\udb81\ude1a` = U+F061A, nf-md-chip). Keep `Widget.qml` ASCII.
+  convert them back before committing (`grep -P '[^\x00-\x7F]' Widget.qml` must find nothing). The
+  chip icon is `󰘚` (U+F061A, nf-md-chip); the buttons use BMP Font Awesome glyphs.
+- `Dropdown` opens its own popup; inside the card that risks clipping, so the model picker is a
+  button list.
 - **Never `pkill -f` a pattern that appears in your own command line.**
 
 ## Commits
