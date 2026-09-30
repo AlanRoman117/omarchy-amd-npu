@@ -218,7 +218,42 @@ cmd_enable() {
   echo "Done. Hold F9 (or Super+Ctrl+X) to dictate."
 }
 
+last_latency() {
+  journalctl --user -u voxtype.service --no-pager -n 200 2>/dev/null | grep -oP 'Remote transcription completed in \K[0-9.]+s' | tail -1 || true
+}
+
+npu_firmware() {
+  command -v xrt-smi >/dev/null || return 0
+  xrt-smi examine 2>/dev/null | grep -oP 'NPU Firmware Version\s*:\s*\K\S+' || true
+}
+
+# One JSON object for the bar widget's popup.
+cmd_status_json() {
+  local service=inactive server=false model=false
+  systemctl --user is-active --quiet "$UNIT" && service=active
+  [[ -f $UNIT_FILE ]] || service=missing
+  server_up && server=true
+  [[ -d $MODEL_DIR ]] && model=true
+  jq -nc \
+    --arg service "$service" --argjson server "$server" --argjson model "$model" \
+    --arg firmware "$(npu_firmware)" --arg backend "$(voxtype_backend)" \
+    --arg last "$(last_latency)" --arg modelName "$MODEL" --arg url "$URL" \
+    '{service: $service, server: $server, model: $model, modelName: $modelName, url: $url,
+      firmware: $firmware, backend: $backend, last: $last}'
+}
+
+# Quiet live check for the widget: prints "ok <seconds>" or "fail <http code>".
+cmd_ping() {
+  local wav code
+  wav=$(mktemp --suffix=.wav)
+  python3 -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0'*16000); w.close()" "$wav"
+  code=$(curl -s -m 30 -o /dev/null -w '%{http_code} %{time_total}' "$URL/v1/audio/transcriptions" -F "file=@$wav" -F "model=$MODEL" || true)
+  rm -f "$wav"
+  if [[ ${code%% *} == 200 ]]; then echo "ok ${code#* }"; else echo "fail ${code%% *}"; return 1; fi
+}
+
 cmd_status() {
+  [[ ${1:-} == --json ]] && { cmd_status_json; return; }
   local ready=0
   step "NPU dictation status"
   if systemctl --user is-active --quiet "$UNIT"; then ok "$UNIT active"; else bad "$UNIT not running"; ready=1; fi
@@ -234,8 +269,7 @@ cmd_status() {
     -) note "Voxtype not set up" ;;
     *) note "Voxtype uses its local model (backend = $backend)"; ready=1 ;;
   esac
-  local last
-  last=$(journalctl --user -u voxtype.service --no-pager -n 200 2>/dev/null | grep -oP 'Remote transcription completed in \K[0-9.]+s' | tail -1 || true)
+  local last; last=$(last_latency)
   [[ -n $last ]] && ok "Last dictation transcribed in $last"
   return $ready
 }
@@ -244,12 +278,8 @@ cmd_doctor() {
   cmd_check || true
   cmd_status || true
   step "Live request"
-  local wav; wav=$(mktemp --suffix=.wav)
-  python3 -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0'*16000); w.close()" "$wav"
-  local code
-  code=$(curl -s -m 30 -o /dev/null -w '%{http_code} %{time_total}' "$URL/v1/audio/transcriptions" -F "file=@$wav" -F "model=$MODEL" || true)
-  rm -f "$wav"
-  if [[ ${code%% *} == 200 ]]; then ok "Transcription endpoint OK (1 s of silence in ${code#* }s)"; else bad "Transcription request failed (HTTP ${code%% *})"; return 1; fi
+  local result; result=$(cmd_ping || true)
+  if [[ $result == ok* ]]; then ok "Transcription endpoint OK (1 s of silence in ${result#ok }s)"; else bad "Transcription request failed (HTTP ${result#fail })"; return 1; fi
 }
 
 cmd_disable() {
@@ -290,15 +320,16 @@ npu-dictation $VERSION - Whisper on the AMD XDNA2 NPU for Omarchy dictation
   check     Is this machine supported? What's installed?
   install   Install the NPU runtime + FastFlowLM and set the memlock limit (sudo, then reboot)
   enable    Download Whisper, start the NPU server, point Voxtype at it
-  status    Show whether dictation is running on the NPU
+  status    Show whether dictation is running on the NPU (--json for scripts)
   doctor    status + a live transcription request
+  ping      Quiet live request: prints "ok <seconds>" or "fail <code>"
   disable   Voxtype back to its local model; stop the server (frees the NPU)
   remove    disable + delete the service (optionally the model, packages and drop-ins)
 EOF
 }
 
 case ${1:-help} in
-  check | install | enable | status | doctor | disable | remove | help) "cmd_$1" ;;
+  check | install | enable | status | doctor | ping | disable | remove | help) "cmd_$1" "${@:2}" ;;
   -h | --help) cmd_help ;;
   -v | --version) echo "$VERSION" ;;
   *) cmd_help; exit 1 ;;

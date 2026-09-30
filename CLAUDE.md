@@ -11,8 +11,8 @@ pitching it upstream to Omarchy, are later decisions; see `to-do.md`.
 | Path | Role |
 |---|---|
 | `manifest.json` | Plugin manifest (`alanroman117.npu-dictation`, `bar-widget`) |
-| `Widget.qml` | Bar icon: ready / stopped (dimmed) / hidden. IPC target `alanroman117.npu-dictation` → `refresh` |
-| `bin/npu-dictation` | check / install / enable / status / doctor / disable / remove |
+| `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.npu-dictation`: `open`, `close`, `toggle`, `refresh` |
+| `bin/npu-dictation` | check / install / enable / status (`--json`) / doctor / ping / disable / remove |
 | `systemd/flm-asr.service` | User unit, copied by `enable` |
 
 ## How it's tested (on the ROG Flow Z13, the only verified machine)
@@ -21,7 +21,9 @@ pitching it upstream to Omarchy, are later decisions; see `to-do.md`.
 - Round trip: `disable` then `enable`. The Voxtype config must come back byte-identical, and a second
   `enable` must create no files or backups.
 - `voxtype transcribe <16 kHz wav>` must log a request in `journalctl --user -u flm-asr`.
-- Widget: `omarchy plugin validate <dir>`. Stop and start `flm-asr`, run
+- Widget: `omarchy plugin validate <dir>`, then **`omarchy restart shell`**. The shell logs
+  "reloading" when a plugin file changes but can keep running the old compiled QML. Open the card
+  with `omarchy-shell alanroman117.npu-dictation open` and screenshot it (`grim -g`). Stop and start `flm-asr`, run
   `omarchy-shell alanroman117.npu-dictation refresh`, and check the icon dims and brightens.
 - The live mic test (hold F9) needs a human.
 
@@ -40,6 +42,8 @@ update it.
 - **Third-party widgets get a restricted bar API** (`PluginBarApi`: `run`, tooltips, popouts,
   `moduleWidgets`), with **no `shellQuote`**. Quote shell arguments locally (`quote()` in
   `Widget.qml`). Check `journalctl --user | grep omarchy-shell` for `TypeError` after any widget change.
+- **Keep `Widget.qml` ASCII.** Some editors and tools turn `\uXXXX` escapes into literal glyphs;
+  convert them back before committing (`grep -P '[^\x00-\x7F]' Widget.qml` must find nothing).
 - The icon is written as an ASCII escape (`\udb81\ude1a` = U+F061A, nf-md-chip). Keep `Widget.qml` ASCII.
 - **Never `pkill -f` a pattern that appears in your own command line.**
 
