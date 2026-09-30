@@ -1,0 +1,305 @@
+#!/bin/bash
+
+# npu-dictation: run Whisper on the AMD XDNA2 NPU (FastFlowLM) and point
+# Omarchy's Voxtype dictation at it, leaving the CPU and GPU free.
+#
+# Usage: npu-dictation <check|install|enable|status|doctor|disable|remove|help>
+
+set -euo pipefail
+
+VERSION=0.1.0
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+
+PORT=52625
+URL="http://127.0.0.1:$PORT"
+MODEL="whisper-v3:turbo"
+MODEL_DIR="$CONFIG_HOME/flm/models/Whisper-V3-Turbo-NPU2"
+UNIT="flm-asr.service"
+UNIT_FILE="$CONFIG_HOME/systemd/user/$UNIT"
+VOXTYPE_CONFIG="$CONFIG_HOME/voxtype/config.toml"
+PLUGIN_ID="alanroman117.npu-dictation"
+PACKAGES=(xrt xrt-plugin-amdxdna fastflowlm)
+
+# The NPU runtime pins model weights, so the user service manager (and the
+# user's terminals, for `flm validate`) need an unlimited memlock limit.
+# Scoped to user sessions only: system services keep their defaults.
+MEMLOCK_USER_AT="/etc/systemd/system/user@.service.d/90-npu-dictation-memlock.conf"
+MEMLOCK_USER_CONF="/etc/systemd/user.conf.d/90-npu-dictation-memlock.conf"
+MEMLOCK_LIMITS="/etc/security/limits.d/90-npu-dictation-memlock.conf"
+
+# --- output helpers ---------------------------------------------------------
+
+ok() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+bad() { printf '  \033[31m✗\033[0m %s\n' "$*"; }
+note() { printf '  \033[33m•\033[0m %s\n' "$*"; }
+step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+die() { printf '\033[31mError:\033[0m %s\n' "$*" >&2; exit 1; }
+
+confirm() {
+  if command -v gum >/dev/null && [[ -t 0 ]]; then
+    gum confirm "$1"
+  else
+    read -r -p "$1 [y/N] " reply
+    [[ $reply == [yY]* ]]
+  fi
+}
+
+refresh_widget() {
+  command -v omarchy-shell >/dev/null && omarchy-shell "$PLUGIN_ID" refresh >/dev/null 2>&1 || true
+}
+
+# --- hardware and state probes ---------------------------------------------
+
+# Prints "xdna2", "xdna1" or "none" from the PCI bus (no lspci dependency).
+npu_generation() {
+  local dev vendor device
+  for dev in /sys/bus/pci/devices/*; do
+    vendor=$(<"$dev/vendor") device=$(<"$dev/device")
+    [[ $vendor == 0x1022 ]] || continue
+    case $device in
+      0x17f0) echo xdna2; return ;;
+      0x1502) echo xdna1; return ;;
+    esac
+  done
+  echo none
+}
+
+packages_missing() {
+  local pkg missing=()
+  for pkg in "${PACKAGES[@]}"; do
+    pacman -Q "$pkg" &>/dev/null || missing+=("$pkg")
+  done
+  echo "${missing[*]}"
+}
+
+server_up() {
+  [[ $(curl -s -m 2 -o /dev/null -w '%{http_code}' "$URL/" 2>/dev/null) != 000 ]]
+}
+
+voxtype_backend() {
+  [[ -f $VOXTYPE_CONFIG ]] || { echo "-"; return; }
+  awk '/^\[/{s=($0=="[whisper]")} s && /^[[:space:]]*backend[[:space:]]*=/{gsub(/.*=[[:space:]]*"|".*/,""); print; f=1; exit} END{if(!f) print "local"}' "$VOXTYPE_CONFIG"
+}
+
+# Sets key = "value" pairs inside [whisper] of the Voxtype config, replacing
+# existing keys and inserting missing ones at the end of the section.
+voxtype_set() {
+  python3 - "$VOXTYPE_CONFIG" "$@" <<'PY'
+import re, sys
+path, pairs = sys.argv[1], sys.argv[2:]
+want = dict(p.split("=", 1) for p in pairs)
+fmt = lambda k, v: f'{k} = {v}' if v.lstrip('-').isdigit() else f'{k} = "{v}"'
+lines = open(path).read().splitlines()
+out, in_whisper, seen, found_section = [], False, set(), False
+def flush():
+    for k, v in want.items():
+        if k not in seen:
+            out.append(fmt(k, v))
+            seen.add(k)
+for line in lines:
+    header = re.match(r'^\s*\[([^\]]+)\]', line)
+    if header:
+        if in_whisper:
+            flush()
+        in_whisper = header.group(1).strip() == "whisper"
+        found_section = found_section or in_whisper
+    elif in_whisper:
+        m = re.match(r'^\s*([A-Za-z_]+)\s*=', line)
+        if m and m.group(1) in want:
+            line = fmt(m.group(1), want[m.group(1)])
+            seen.add(m.group(1))
+    out.append(line)
+if in_whisper:
+    flush()
+if not found_section:
+    out += ["", "[whisper]"]
+    flush()
+open(path, "w").write("\n".join(out) + "\n")
+PY
+}
+
+backup() { cp -a "$1" "$1.bak.$(date +%s)"; }
+
+# --- commands ---------------------------------------------------------------
+
+cmd_check() {
+  local gen fail=0
+  step "Hardware"
+  gen=$(npu_generation)
+  case $gen in
+    xdna2) ok "AMD XDNA2 NPU found (Strix / Krackan / Strix Halo / Gorgon Point)" ;;
+    xdna1) bad "AMD XDNA1 NPU (Phoenix / Hawk Point): FastFlowLM needs XDNA2"; fail=1 ;;
+    *) bad "No AMD NPU found"; fail=1 ;;
+  esac
+  if compgen -G "/dev/accel/accel*" >/dev/null; then ok "NPU device node present ($(ls /dev/accel | head -1))"; else bad "No /dev/accel device"; fail=1; fi
+  if [[ -d /sys/module/amdxdna ]]; then ok "amdxdna kernel driver loaded"; else bad "amdxdna driver not loaded (kernel 6.14+ has it in-tree)"; fail=1; fi
+
+  step "Software"
+  local missing; missing=$(packages_missing)
+  if [[ -z $missing ]]; then ok "Packages installed: ${PACKAGES[*]}"; else note "Not installed yet: $missing  (run: npu-dictation install)"; fi
+  if [[ $(ulimit -l) == unlimited ]]; then ok "Memlock limit unlimited"; else note "Memlock limit is $(ulimit -l) KiB (install sets it; reboot after)"; fi
+  if command -v voxtype >/dev/null; then ok "Voxtype installed"; else note "Voxtype not installed (omarchy voxtype install) - the NPU server still works on its own"; fi
+  return $fail
+}
+
+cmd_install() {
+  cmd_check || die "This machine doesn't have a supported XDNA2 NPU."
+  step "Install"
+  echo "  This will (with sudo):"
+  echo "   - install ${PACKAGES[*]} from the Arch repos"
+  echo "   - allow unlimited locked memory for your user session (the NPU runtime needs it)"
+  confirm "Continue?" || exit 1
+
+  if command -v omarchy-pkg-add >/dev/null; then
+    omarchy-pkg-add "${PACKAGES[@]}"
+  else
+    sudo pacman -S --needed "${PACKAGES[@]}"
+  fi
+
+  sudo mkdir -p "$(dirname "$MEMLOCK_USER_AT")" "$(dirname "$MEMLOCK_USER_CONF")" "$(dirname "$MEMLOCK_LIMITS")"
+  printf '[Service]\nLimitMEMLOCK=infinity\n' | sudo tee "$MEMLOCK_USER_AT" >/dev/null
+  printf '[Manager]\nDefaultLimitMEMLOCK=infinity\n' | sudo tee "$MEMLOCK_USER_CONF" >/dev/null
+  printf '%s soft memlock unlimited\n%s hard memlock unlimited\n' "$USER" "$USER" | sudo tee "$MEMLOCK_LIMITS" >/dev/null
+  ok "Packages installed and memlock drop-ins written"
+
+  echo
+  echo "Reboot, then run: npu-dictation enable"
+}
+
+cmd_enable() {
+  cmd_check >/dev/null || die "No supported XDNA2 NPU (run: npu-dictation check)."
+  [[ -z $(packages_missing) ]] || die "Packages missing (run: npu-dictation install)."
+
+  step "Validate the NPU stack"
+  local validation
+  validation=$(flm validate 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+  grep -q 'Memlock Limit: infinity' <<<"$validation" || die "Memlock is not unlimited yet. Reboot after 'npu-dictation install'."
+  grep -q 'NPU FW Version' <<<"$validation" || { echo "$validation"; die "flm validate failed."; }
+  ok "$(grep -o 'NPU FW Version: .*' <<<"$validation")"
+
+  step "Whisper model"
+  if [[ -d $MODEL_DIR ]]; then ok "$MODEL already downloaded"; else flm pull "$MODEL"; fi
+
+  step "Service"
+  mkdir -p "$(dirname "$UNIT_FILE")"
+  if [[ -f $UNIT_FILE ]] && ! cmp -s "$UNIT_FILE" "$ROOT/systemd/$UNIT"; then
+    backup "$UNIT_FILE"
+    note "Replaced an existing $UNIT (backup kept next to it)"
+  fi
+  cp "$ROOT/systemd/$UNIT" "$UNIT_FILE"
+  systemctl --user daemon-reload
+  systemctl --user enable "$UNIT" >/dev/null 2>&1
+  systemctl --user restart "$UNIT"
+  local i
+  for i in $(seq 1 30); do server_up && break; sleep 1; done
+  server_up || die "The NPU server didn't come up (journalctl --user -u $UNIT)."
+  ok "$UNIT running on $URL"
+
+  step "Voxtype"
+  if [[ -f $VOXTYPE_CONFIG ]]; then
+    local before
+    before=$(<"$VOXTYPE_CONFIG")
+    backup "$VOXTYPE_CONFIG"
+    voxtype_set backend=remote remote_endpoint="$URL" remote_model="$MODEL" remote_timeout_secs=60
+    if [[ $before == "$(<"$VOXTYPE_CONFIG")" ]]; then
+      rm -f "$(ls -t "$VOXTYPE_CONFIG".bak.* | head -1)"
+      ok "Already pointed at the NPU"
+    else
+      ok "Dictation now transcribes on the NPU (backup: $(basename "$(ls -t "$VOXTYPE_CONFIG".bak.* | head -1)"))"
+    fi
+    systemctl --user restart voxtype.service 2>/dev/null || true
+  else
+    note "Voxtype isn't set up. Run 'omarchy voxtype install', then 'npu-dictation enable' again."
+  fi
+
+  refresh_widget
+  echo
+  echo "Done. Hold F9 (or Super+Ctrl+X) to dictate."
+}
+
+cmd_status() {
+  local ready=0
+  step "NPU dictation status"
+  if systemctl --user is-active --quiet "$UNIT"; then ok "$UNIT active"; else bad "$UNIT not running"; ready=1; fi
+  if server_up; then ok "Server answering on $URL"; else bad "Server not answering on $URL"; ready=1; fi
+  if [[ -d $MODEL_DIR ]]; then ok "Model $MODEL present"; else bad "Model $MODEL not downloaded"; ready=1; fi
+  if command -v xrt-smi >/dev/null; then
+    local fw; fw=$(xrt-smi examine 2>/dev/null | grep -oP 'NPU Firmware Version\s*:\s*\K\S+' || true)
+    [[ -n $fw ]] && ok "NPU firmware $fw"
+  fi
+  local backend; backend=$(voxtype_backend)
+  case $backend in
+    remote) ok "Voxtype uses the NPU (backend = remote)" ;;
+    -) note "Voxtype not set up" ;;
+    *) note "Voxtype uses its local model (backend = $backend)"; ready=1 ;;
+  esac
+  local last
+  last=$(journalctl --user -u voxtype.service --no-pager -n 200 2>/dev/null | grep -oP 'Remote transcription completed in \K[0-9.]+s' | tail -1 || true)
+  [[ -n $last ]] && ok "Last dictation transcribed in $last"
+  return $ready
+}
+
+cmd_doctor() {
+  cmd_check || true
+  cmd_status || true
+  step "Live request"
+  local wav; wav=$(mktemp --suffix=.wav)
+  python3 -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0'*16000); w.close()" "$wav"
+  local code
+  code=$(curl -s -m 30 -o /dev/null -w '%{http_code} %{time_total}' "$URL/v1/audio/transcriptions" -F "file=@$wav" -F "model=$MODEL" || true)
+  rm -f "$wav"
+  if [[ ${code%% *} == 200 ]]; then ok "Transcription endpoint OK (1 s of silence in ${code#* }s)"; else bad "Transcription request failed (HTTP ${code%% *})"; return 1; fi
+}
+
+cmd_disable() {
+  step "Disable NPU dictation"
+  if [[ -f $VOXTYPE_CONFIG && $(voxtype_backend) == remote ]]; then
+    backup "$VOXTYPE_CONFIG"
+    voxtype_set backend=local
+    systemctl --user restart voxtype.service 2>/dev/null || true
+    ok "Voxtype back on its local model"
+  fi
+  systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
+  ok "$UNIT stopped; the NPU is free"
+  refresh_widget
+}
+
+cmd_remove() {
+  cmd_disable
+  step "Remove"
+  rm -f "$UNIT_FILE"
+  systemctl --user daemon-reload
+  ok "Removed $UNIT"
+  if [[ -d $MODEL_DIR ]] && confirm "Delete the Whisper model ($(du -sh "$MODEL_DIR" | cut -f1))?"; then
+    rm -rf "$MODEL_DIR"
+    ok "Model deleted"
+  fi
+  if confirm "Also uninstall ${PACKAGES[*]} and the memlock drop-ins (sudo)?"; then
+    sudo pacman -Rns "${PACKAGES[@]}" || true
+    sudo rm -f "$MEMLOCK_USER_AT" "$MEMLOCK_USER_CONF" "$MEMLOCK_LIMITS"
+    ok "Packages and drop-ins removed (reboot to reset the memlock limit)"
+  fi
+  refresh_widget
+}
+
+cmd_help() {
+  cat <<EOF
+npu-dictation $VERSION - Whisper on the AMD XDNA2 NPU for Omarchy dictation
+
+  check     Is this machine supported? What's installed?
+  install   Install the NPU runtime + FastFlowLM and set the memlock limit (sudo, then reboot)
+  enable    Download Whisper, start the NPU server, point Voxtype at it
+  status    Show whether dictation is running on the NPU
+  doctor    status + a live transcription request
+  disable   Voxtype back to its local model; stop the server (frees the NPU)
+  remove    disable + delete the service (optionally the model, packages and drop-ins)
+EOF
+}
+
+case ${1:-help} in
+  check | install | enable | status | doctor | disable | remove | help) "cmd_$1" ;;
+  -h | --help) cmd_help ;;
+  -v | --version) echo "$VERSION" ;;
+  *) cmd_help; exit 1 ;;
+esac

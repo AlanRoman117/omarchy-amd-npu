@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "alanroman117.npu-dictation",
+  "name": "NPU Dictation",
+  "version": "0.1.0",
+  "author": "Alan Roman",
+  "license": "MIT",
+  "description": "Shows whether Voxtype dictation is running on the AMD XDNA2 NPU (FastFlowLM Whisper server).",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "NPU Dictation",
+    "description": "NPU Whisper server status for Voxtype dictation. Click to start it when stopped, or to open the status when running.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 15
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 15
+      }
+    ]
+  }
+}
