@@ -40,7 +40,7 @@ update it.
 - **Third-party widgets get a restricted bar API** (`PluginBarApi`: `run`, tooltips, popouts,
   `moduleWidgets`), with **no `shellQuote`**. Quote shell arguments locally (`quote()` in
   `Widget.qml`). Check `journalctl --user | grep omarchy-shell` for `TypeError` after any widget change.
-- The icon is written as an ASCII escape (`󰘚`, nf-md-chip). Keep `Widget.qml` ASCII.
+- The icon is written as an ASCII escape (`\udb81\ude1a` = U+F061A, nf-md-chip). Keep `Widget.qml` ASCII.
 - **Never `pkill -f` a pattern that appears in your own command line.**
 
 ## Commits
