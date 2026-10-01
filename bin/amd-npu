@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-VERSION=0.2.0
+VERSION=0.2.1
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
@@ -163,10 +163,11 @@ env_get() {
   echo "${val:-$2}"
 }
 
-# env_write <llm> <asr 0|1> <ctx>
+# env_write <llm> <asr 0|1> <ctx>. Keeps the user's FLM_CORS setting.
 env_write() {
+  local cors; cors=$(env_get FLM_CORS 0)
   mkdir -p "$STATE_DIR"
-  printf '# Written by amd-npu. FLM_LLM empty = Whisper only; FLM_ASR=0 = LLM has the NPU alone.\nFLM_LLM=%s\nFLM_ASR=%s\nFLM_CTX=%s\n' "$1" "$2" "$3" >"$SERVER_ENV"
+  printf '# Written by amd-npu. FLM_LLM empty = Whisper only; FLM_ASR=0 = LLM has the NPU alone.\n# FLM_CORS=1 turns CORS on, for browser chat UIs (off by default).\nFLM_LLM=%s\nFLM_ASR=%s\nFLM_CTX=%s\nFLM_CORS=%s\n' "$1" "$2" "$3" "$cors" >"$SERVER_ENV"
 }
 
 # whisper | share | exclusive, from the saved settings
@@ -460,6 +461,7 @@ cmd_load() {
     shift
   done
   [[ -n $m ]] || die "Usage: amd-npu load <model> [--exclusive] [--ctx N]"
+  [[ $ctx =~ ^-?[0-9]+$ ]] || die "--ctx needs a whole number (-1 = the model's default)"
   require_downloaded_llm "$m"
   local prev prev_ctx
   prev=$(mode)
