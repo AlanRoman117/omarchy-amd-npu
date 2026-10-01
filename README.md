@@ -92,6 +92,10 @@ A chip icon on the right of the bar: bright when the NPU server is up, dimmed wh
 hidden when it isn't set up. Click it for a card in the style of Omarchy's Wi-Fi, Bluetooth and
 power panels:
 
+| Whisper only | Sharing with an LLM | LLM on the NPU alone |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/card-whisper.png" width="260" alt="Card with Whisper only: dictation on the NPU, downloaded models listed with Share / NPU only and Load"> | <img src="docs/screenshots/card-share.png" width="260" alt="Card with qwen3.5:4b loaded next to Whisper: model details, memory, API address, Test LLM and Unload"> | <img src="docs/screenshots/card-exclusive.png" width="260" alt="Card with qwen3.5:4b on the NPU alone: dictation switch off, Voxtype on its CPU model"> |
+
 - **Header:** READY, READY + LLM, LLM ONLY, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
   your last dictation time.
 - **Dictate on the NPU:** a switch. In NPU-only mode, switching it on moves the model to share mode
