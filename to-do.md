@@ -17,12 +17,16 @@
       `user@.service.d` version. Reboot and verify `flm validate`.
 
 ## Hardening (optional, from the 2026-09-30 security review)
-- [ ] Consider `--cors 0` in the unit. FastFlowLM enables CORS by default, so a web page can call
-      the server and read the answers. Voxtype, `amd-npu` and server-side clients don't need CORS,
-      but browser-only chat UIs would stop working.
+- [x] CORS off in the unit (`--cors ${FLM_CORS}`, 0 unless `FLM_CORS=1` in `server.env`), since
+      0.2.1. Browser-only chat UIs opt in. In 1.0.4 this only removes the preflight answer.
+- [ ] Report upstream: with `--cors 0`, FastFlowLM 1.0.4 still sends `Access-Control-Allow-Origin: *`
+      on every response and parses `text/plain` bodies as JSON. So a page can still send a "simple"
+      POST to `/v1/chat/completions`, read the answer, and make the server download any model it
+      names. Fix: no CORS headers with `--cors 0`, and require `Content-Type: application/json`.
 - [ ] Ask FastFlowLM upstream for an API key / token on `flm serve` (1.0.4 has none), so other
-      local processes can't use the server. If it lands, set it in `server.env` and pass it from
-      Voxtype and `amd-npu`.
+      local processes can't use the server, plus a Host header check against DNS rebinding (1.0.4
+      accepts any Host). If a token lands, set it in `server.env` and pass it from Voxtype and
+      `amd-npu`.
 - [ ] Multi-user machines: another account could bind 52625 while the service is down and
       receive dictation audio. Only matters if multi-user setups become a supported case.
 

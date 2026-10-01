@@ -61,6 +61,9 @@ Then **hold F9** (or **Super + Ctrl + X**) to dictate, as usual. Tip: add the CL
 Omarchy's plugin installer never runs code or sudo, which is why steps 2 and 3 are separate
 commands you run yourself.
 
+To update: `omarchy plugin update alanroman117.amd-npu`, then run `amd-npu enable` again so the
+service file is refreshed (the old one is kept as a backup if it changed).
+
 ## Local models
 
 ```bash
@@ -136,7 +139,8 @@ doesn't repeat them.
   - `/etc/systemd/user.conf.d/90-amd-npu-memlock.conf`
   - `/etc/security/limits.d/90-amd-npu-memlock.conf`
 - **Service:** `~/.config/systemd/user/amd-npu.service` (`flm serve` on `127.0.0.1:52625`), with its
-  settings in `~/.config/amd-npu/server.env` (which model, Whisper on or off, context length).
+  settings in `~/.config/amd-npu/server.env` (which model, Whisper on or off, context length,
+  browser access).
 - **Models:** `~/.config/flm/models/`.
 - **Voxtype config:** in `~/.config/voxtype/config.toml`, `[whisper]` gets `backend = "remote"` and
   `remote_endpoint = "http://127.0.0.1:52625"`. The endpoint has no `/v1`; Voxtype adds it. NPU-only
@@ -151,9 +155,15 @@ doesn't repeat them.
 - **Don't force NPU firmware versions or install `amdxdna-dkms`** on a current kernel. A mismatch can
   make the NPU disappear.
 - **The server listens only on `127.0.0.1`, without authentication.** Anything running on this
-  machine, under any user, can use it. FastFlowLM also enables CORS by default, so a web page open in
-  your browser could use it too (for example to swap models). That's fine on a single-user laptop.
-  On a shared machine, another account could also take the port while the service is stopped.
+  machine, under any user, can use it. That's fine on a single-user laptop. On a shared machine,
+  another account could also take the port while the service is stopped.
+- **Web pages in your browser can still reach the server.** FastFlowLM enables CORS by default; the
+  service turns it off (`--cors 0`), so a page that sends JSON the normal way is refused. FastFlowLM
+  1.0.4 still marks every answer as readable from any site, and it accepts a request sent as plain
+  text. A page written to do that can still chat with the loaded model, read the answers, or name a
+  model and make the server download it. Closing that needs a fix in FastFlowLM. A browser-based
+  chat UI needs CORS back: add `FLM_CORS=1` to `~/.config/amd-npu/server.env` and run
+  `systemctl --user restart amd-npu`.
 
 ## Uninstall
 

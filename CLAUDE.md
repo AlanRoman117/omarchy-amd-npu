@@ -15,22 +15,24 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 | `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.amd-npu`: `open`, `close`, `toggle`, `refresh` |
 | `bin/amd-npu` | Setup, dictation and model commands (`amd-npu help`) |
 | `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin) |
-| `systemd/amd-npu.service` | User unit, copied by `enable`. Reads `~/.config/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`) |
+| `systemd/amd-npu.service` | User unit, copied by `enable`. Reads `~/.config/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`, `FLM_CORS`) |
 
 Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LLM + `FLM_ASR=1`),
 **exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `backend = "local"`, notifications both ways).
 
 ## Current state (2026-10-01)
 
-- Version 0.2.0. PRs #1-#6 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.2.1. PRs #1-#9 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - The maintainer's Z13 normally runs **Whisper only** (`FLM_LLM=` empty), with Voxtype on the NPU.
   `qwen3.5:0.8b` and `qwen3.5:4b` are downloaded for testing.
 - The installed plugin (`~/.config/omarchy/plugins/alanroman117.amd-npu/`) is a git clone of the
   public `main`. Keep it in sync after a merge with `omarchy plugin update alanroman117.amd-npu`.
   If `Widget.qml` changed, also run `omarchy restart shell`.
-- `/security-review` of the whole repo ran on 2026-09-30: no HIGH or MEDIUM findings. Its optional
-  follow-ups (CORS, server auth, multi-user port takeover) are under Hardening in `to-do.md`.
+- `/security-review` of the whole repo ran on 2026-09-30: no HIGH or MEDIUM findings. 0.2.1 turned
+  CORS off by default (`FLM_CORS=1` in `server.env` opts back in; `env_write` keeps it), which is
+  only partial in FastFlowLM 1.0.4 (see below). The rest (server auth, Host check, multi-user port
+  takeover) is under Hardening in `to-do.md`.
 - Next up: the open items in `to-do.md` (test on another XDNA2 machine, a clean-install test, the
   plugin id prefix, the Omarchy Discussions pitch).
 
@@ -47,6 +49,11 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 - No unload endpoint: unloading restarts the server Whisper-only.
 - **With Whisper off, `/v1/audio/transcriptions` answers HTTP 200 with a body of `null`.** Check
   the body (`ping` does), not just the status.
+- **CORS is `*` by default and any `Host` header is accepted.** The unit passes `--cors ${FLM_CORS}`
+  (0 unless set), but in 1.0.4 that only drops the OPTIONS handler (preflight gets 404). Every
+  response still carries `Access-Control-Allow-Origin: *`, and a `text/plain` POST is parsed as
+  JSON, so a web page can still chat, read the answer and trigger model downloads. Upstream issue
+  is in `to-do.md`.
 - `/api/ps` returns an error JSON when no LLM is loaded (internal placeholder `model-faker`).
 - Speeds (`prefill_speed_tps`, `decoding_speed_tps`) come back in each response's `usage`, only to
   the caller.
