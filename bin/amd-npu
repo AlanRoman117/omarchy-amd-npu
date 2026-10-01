@@ -152,7 +152,7 @@ voxtype_use() {
   [[ $(voxtype_backend) == "$1" ]] && return 0
   backup "$VOXTYPE_CONFIG"
   if [[ $1 == remote ]]; then
-    voxtype_set backend=remote remote_endpoint="$URL" remote_model="$WHISPER" remote_timeout_secs=60
+    voxtype_set backend=remote remote_endpoint="$URL" remote_model="$WHISPER" remote_timeout_secs=180
   else
     voxtype_set backend=local
   fi
