@@ -1,0 +1,14 @@
+[Unit]
+Description=AMD NPU API on 127.0.0.1:52625 (proxy to FastFlowLM; refuses browser pages and model downloads)
+Documentation=https://github.com/AlanRoman117/omarchy-amd-npu
+PartOf=amd-npu.service
+After=amd-npu.service
+
+[Service]
+Environment=AMD_NPU_ALLOWED_ORIGINS=
+EnvironmentFile=-%h/.config/amd-npu/server.env
+ExecStart=/usr/bin/python3 %h/.local/share/amd-npu/proxy.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateUsers=yes
