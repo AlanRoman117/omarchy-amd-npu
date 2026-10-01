@@ -16,6 +16,16 @@
       `/etc/security/limits.d/99-npu-memlock.conf`) to this repo's narrower
       `user@.service.d` version. Reboot and verify `flm validate`.
 
+## Hardening (optional, from the 2026-09-30 security review)
+- [ ] Consider `--cors 0` in the unit. FastFlowLM enables CORS by default, so a web page can call
+      the server and read the answers. Voxtype, `amd-npu` and server-side clients don't need CORS,
+      but browser-only chat UIs would stop working.
+- [ ] Ask FastFlowLM upstream for an API key / token on `flm serve` (1.0.4 has none), so other
+      local processes can't use the server. If it lands, set it in `server.env` and pass it from
+      Voxtype and `amd-npu`.
+- [ ] Multi-user machines: another account could bind 52625 while the service is down and
+      receive dictation audio. Only matters if multi-user setups become a supported case.
+
 ## Local models: ideas
 - [ ] Dictation priority in share mode: FastFlowLM runs one request at a time, so a long LLM answer
       delays dictation. Options: ask FastFlowLM upstream for request priority, or have `amd-npu`
