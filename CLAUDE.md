@@ -20,6 +20,18 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LLM + `FLM_ASR=1`),
 **exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `backend = "local"`, notifications both ways).
 
+## Current state (2026-10-01)
+
+- Version 0.2.0. PRs #1-#6 are merged and `main` is what's installed. Public on GitHub since
+  2026-09-30.
+- The maintainer's Z13 normally runs **Whisper only** (`FLM_LLM=` empty), with Voxtype on the NPU.
+  `qwen3.5:0.8b` and `qwen3.5:4b` are downloaded for testing.
+- The installed plugin (`~/.config/omarchy/plugins/alanroman117.amd-npu/`) is a git clone of the
+  public `main`. Keep it in sync after a merge with `omarchy plugin update alanroman117.amd-npu`.
+  If `Widget.qml` changed, also run `omarchy restart shell`.
+- Next up: run `/security-review` on this repo, then the open items in `to-do.md` (test on another
+  XDNA2 machine, a clean-install test, the plugin id prefix, the Omarchy Discussions pitch).
+
 ## FastFlowLM behaviour this relies on (1.0.4, read from `src/server/rest_handler.cpp`)
 
 - One model per type (ASR, LLM, embedding) loaded at once; types coexist, so Whisper stays while
@@ -60,6 +72,26 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 The installed plugin is a separate copy at `~/.config/omarchy/plugins/alanroman117.amd-npu/` (a git
 clone once installed with `omarchy plugin add`). Edits here don't reach it until you update it.
 
+## README screenshots (`docs/screenshots/`)
+
+Three card states: `card-whisper.png`, `card-share.png` (qwen3.5:4b shared) and `card-exclusive.png`.
+To retake them:
+
+1. Put the server in the state (`amd-npu load qwen3.5:4b [--exclusive --yes]`). After an
+   exclusive switch, wait ~10 s for the desktop notification to clear before capturing.
+2. `omarchy-shell alanroman117.amd-npu open`, wait ~3 s, then `grim -g "<x>,0 600x<h>"` over the
+   right side of the screen, then `omarchy-shell alanroman117.amd-npu close`.
+3. Crop exactly to the card so nothing behind it shows. The card has a 2 px border in the theme's
+   accent colour (RGB 80,148,117 in the theme used for the current shots). Find the first column and
+   row with a long straight run of that colour, which is the card's top-left corner, then follow the top
+   edge right and the left edge down. Don't just take the colour's bounding box: terminal frames behind
+   the card share the colour.
+4. Check for privacy (only the card in frame, no PNG metadata) and keep the files small.
+
+The current shots are 1x (about 380 px wide), taken on a 1080p external display. The Z13's own screen
+(scale 2) gives sharper ones. In exclusive mode, LAST DICTATION reads "-" right after the switch,
+because only NPU dictations are counted.
+
 ## Rules learned the hard way
 
 - **Voxtype's `remote_endpoint` has no `/v1`**, because Voxtype appends it.
@@ -73,12 +105,14 @@ clone once installed with `omarchy plugin add`). Edits here don't reach it until
   `Widget.qml`). Check `journalctl --user | grep omarchy-shell` for `TypeError` after any widget change.
 - **Keep `Widget.qml` ASCII.** Some editors and tools turn `\uXXXX` escapes into literal glyphs;
   convert them back before committing (`grep -P '[^\x00-\x7F]' Widget.qml` must find nothing). The
-  chip icon is `󰘚` (U+F061A, nf-md-chip); the buttons use BMP Font Awesome glyphs.
+  chip icon is `\udb81\ude1a` (U+F061A, nf-md-chip); the buttons use BMP Font Awesome glyphs.
 - `Dropdown` opens its own popup; inside the card that risks clipping, so the model picker is a
   button list.
 - **Never `pkill -f` a pattern that appears in your own command line.**
 
 ## Commits
 
-Branch + PR, like the other repos in `~/Github/my-projects`. Commit messages end with the
-Co-Authored-By line for Claude.
+Branch + PR, like the other repos in `~/Github/my-projects`, with merge commits (`gh pr merge --merge
+--delete-branch`). The maintainer has OK'd merging PRs for this repo. Before pushing, check that
+nothing personal is in the diff: no home-directory usernames, tokens or emails beyond the git author.
+Commit messages end with the Co-Authored-By line for Claude.
