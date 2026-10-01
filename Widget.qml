@@ -197,13 +197,14 @@ Panel {
     var left = Math.max(0, recLimit - Math.floor((Date.now() - recStartMs) / 1000))
     if (left === recRemaining) return
     recRemaining = left
-    var text = mmss(left)
+    // The OSD draws its draining bar only when `message` is empty; the time
+    // then becomes the bar's label.
     showOsd({
       icon: "microphone",
-      message: left <= 15 ? text + " left - finishing soon" : "Recording - " + text + " left",
+      message: "",
       value: String(left),
       max: String(recLimit),
-      progressText: text,
+      progressText: mmss(left) + (left <= 15 ? " left - finishing soon" : " left"),
       duration: "1500"
     })
   }
