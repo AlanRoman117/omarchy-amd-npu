@@ -3,7 +3,6 @@
 ## Before announcing it
 - [ ] Test on at least one more XDNA2 machine (Strix Point laptop, Framework 13 AMD AI 300, …).
 - [ ] Test a clean install end to end: `install` → reboot → `enable` on a machine with no earlier setup.
-- [ ] Screenshots of the card states for the README (Whisper only, share, NPU only).
 - [ ] Decide whether the plugin id keeps the `alanroman117.` prefix.
 
 ## Upstream idea
