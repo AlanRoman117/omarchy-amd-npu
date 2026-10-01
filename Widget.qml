@@ -32,6 +32,18 @@ Panel {
   property bool loadExclusive: false
   property bool confirming: false
 
+  // Live dictation countdown: Voxtype's state while F9 is held, against its
+  // max_duration_secs (read from ~/.config/voxtype/config.toml, default 60).
+  property string recState: "idle"
+  property int recLimit: 60
+  property real recStartMs: 0
+  property int recRemaining: 0
+  property bool osdShown: false
+  property var osdPending: null
+  readonly property bool recording: recState === "recording"
+  readonly property bool recWarn: recording && recRemaining <= 15
+  readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
+
   readonly property string cli: Qt.resolvedUrl("bin/amd-npu").toString().replace("file://", "")
   readonly property var llm: info.llm || null
   readonly property var downloaded: info.downloaded || []
@@ -135,6 +147,68 @@ Panel {
     return "CPU model"
   }
 
+  function mmss(seconds) {
+    var s = Math.max(0, Math.floor(seconds))
+    return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2)
+  }
+
+  function parseVoxtypeLimit(text) {
+    var m = /^\s*\[audio\][^\[]*?^\s*max_duration_secs\s*=\s*(\d+)/m.exec(String(text || ""))
+    recLimit = m ? parseInt(m[1]) : 60
+  }
+
+  // Omarchy's OSD (the volume/brightness overlay), driven through its IPC.
+  // One update in flight at a time; the latest pending payload wins.
+  function showOsd(payload) {
+    if (osdProc.running) {
+      osdPending = payload
+      return
+    }
+    osdProc.command = ["omarchy-shell", "-q", "osd", "show", JSON.stringify(payload)]
+    osdProc.running = true
+    osdShown = true
+  }
+
+  function closeOsd() {
+    osdPending = null
+    if (!osdShown) return
+    osdShown = false
+    if (!osdCloseProc.running) osdCloseProc.running = true
+  }
+
+  function onVoxtypeState(raw) {
+    var data
+    try { data = JSON.parse(String(raw)) } catch (e) { return }
+    var state = String(data.alt || data["class"] || "idle")
+    if (state === recState) return
+    recState = state
+    if (state === "recording") {
+      recStartMs = Date.now()
+      recRemaining = -1
+      tickCountdown()
+    } else if (state === "transcribing") {
+      showOsd({ icon: "microphone", message: "Transcribing...", duration: "0" })
+    } else {
+      closeOsd()
+    }
+  }
+
+  function tickCountdown() {
+    var left = Math.max(0, recLimit - Math.floor((Date.now() - recStartMs) / 1000))
+    if (left === recRemaining) return
+    recRemaining = left
+    // The OSD draws its draining bar only when `message` is empty; the time
+    // then becomes the bar's label.
+    showOsd({
+      icon: "microphone",
+      message: "",
+      value: String(left),
+      max: String(recLimit),
+      progressText: mmss(left) + (left <= 15 ? " left - finishing soon" : " left"),
+      duration: "1500"
+    })
+  }
+
   IpcHandler {
     target: "alanroman117.amd-npu"
 
@@ -236,6 +310,59 @@ Panel {
     }
   }
 
+  // Voxtype's live state, as Omarchy's own Dictation indicator reads it. The
+  // follower dies with the shell (pdeathsig) and is restarted if Voxtype restarts.
+  Process {
+    id: voxtypeStatus
+    command: ["setpriv", "--pdeathsig", "TERM", "voxtype", "status", "--follow", "--format", "json"]
+    running: true
+    stdout: SplitParser {
+      onRead: function(line) { root.onVoxtypeState(line) }
+    }
+    onExited: {
+      root.onVoxtypeState('{"alt": "idle"}')
+      voxtypeRetry.restart()
+    }
+  }
+
+  Timer {
+    id: voxtypeRetry
+    interval: 10000
+    onTriggered: voxtypeStatus.running = true
+  }
+
+  Timer {
+    interval: 250
+    running: root.recording
+    repeat: true
+    onTriggered: root.tickCountdown()
+  }
+
+  FileView {
+    path: root.configHome + "/voxtype/config.toml"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.parseVoxtypeLimit(text())
+    onLoadFailed: root.recLimit = 60
+  }
+
+  Process {
+    id: osdProc
+    onExited: {
+      if (root.osdPending !== null) {
+        var next = root.osdPending
+        root.osdPending = null
+        root.showOsd(next)
+      }
+    }
+  }
+
+  Process {
+    id: osdCloseProc
+    command: ["omarchy-shell", "-q", "osd", "close"]
+  }
+
   // Bar icon: poll at the configured interval. Card details: every 5 s while open.
   Timer {
     interval: Math.max(5, root.setting("refreshIntervalSec", 15)) * 1000
@@ -256,9 +383,12 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "\udb81\ude1a"
-    dimmed: root.status === "stopped"
-    tooltipText: root.opened ? "" : (root.status === "ready"
+    text: root.recording ? root.mmss(root.recRemaining) : "\udb81\ude1a"
+    slotSize: root.recording && !vertical ? Style.bar.iconSlot * 2.2 : Style.bar.iconSlot
+    fontSize: root.recording ? Style.font.caption : Style.bar.iconFont
+    active: root.recWarn
+    dimmed: root.status === "stopped" && !root.recording
+    tooltipText: root.opened || root.recording ? "" : (root.status === "ready"
       ? (root.llm ? "AMD NPU: dictation + " + root.llm.name : "AMD NPU: dictation ready")
       : "AMD NPU server stopped")
     onPressed: function(b) { root.toggle() }

@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-VERSION=0.3.0
+VERSION=0.4.0
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
