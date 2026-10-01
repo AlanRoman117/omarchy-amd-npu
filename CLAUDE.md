@@ -6,8 +6,8 @@ Context for working on this repository. Read this before changing anything.
 
 An Omarchy shell plugin (bar card) plus a CLI that put the AMD XDNA2 NPU to work through
 FastFlowLM: Whisper large-v3-turbo for Voxtype dictation, and optional small local LLMs next to it
-or on their own. **Private for now.** Going public, and pitching it upstream to Omarchy, are later
-decisions; see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
+or on their own. **Public since 2026-09-30.** Pitching it upstream to Omarchy is a later decision;
+see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 
 | Path | Role |
 |---|---|
