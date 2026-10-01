@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "alanroman117.npu-dictation",
-  "name": "NPU Dictation",
-  "version": "0.1.0",
+  "id": "alanroman117.amd-npu",
+  "name": "AMD NPU",
+  "version": "0.2.0",
   "author": "Alan Roman",
   "license": "MIT",
-  "description": "Shows whether Voxtype dictation is running on the AMD XDNA2 NPU (FastFlowLM Whisper server).",
+  "description": "Dictation (Whisper) and small local LLMs on the AMD XDNA2 NPU, with a status card.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,8 +13,8 @@
     "barWidget": "Widget.qml"
   },
   "barWidget": {
-    "displayName": "NPU Dictation",
-    "description": "NPU Whisper server status for Voxtype dictation. Click to start it when stopped, or to open the status when running.",
+    "displayName": "AMD NPU",
+    "description": "AMD NPU card: dictation on the NPU, plus loading, testing and unloading small local LLMs next to Whisper or on their own.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
