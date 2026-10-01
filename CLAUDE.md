@@ -29,8 +29,10 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 - The installed plugin (`~/.config/omarchy/plugins/alanroman117.amd-npu/`) is a git clone of the
   public `main`. Keep it in sync after a merge with `omarchy plugin update alanroman117.amd-npu`.
   If `Widget.qml` changed, also run `omarchy restart shell`.
-- Next up: run `/security-review` on this repo, then the open items in `to-do.md` (test on another
-  XDNA2 machine, a clean-install test, the plugin id prefix, the Omarchy Discussions pitch).
+- `/security-review` of the whole repo ran on 2026-09-30: no HIGH or MEDIUM findings. Its optional
+  follow-ups (CORS, server auth, multi-user port takeover) are under Hardening in `to-do.md`.
+- Next up: the open items in `to-do.md` (test on another XDNA2 machine, a clean-install test, the
+  plugin id prefix, the Omarchy Discussions pitch).
 
 ## FastFlowLM behaviour this relies on (1.0.4, read from `src/server/rest_handler.cpp`)
 

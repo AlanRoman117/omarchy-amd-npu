@@ -150,7 +150,10 @@ doesn't repeat them.
   which puts Voxtype back on its CPU model.
 - **Don't force NPU firmware versions or install `amdxdna-dkms`** on a current kernel. A mismatch can
   make the NPU disappear.
-- The server listens only on `127.0.0.1`.
+- **The server listens only on `127.0.0.1`, without authentication.** Anything running on this
+  machine, under any user, can use it. FastFlowLM also enables CORS by default, so a web page open in
+  your browser could use it too (for example to swap models). That's fine on a single-user laptop.
+  On a shared machine, another account could also take the port while the service is stopped.
 
 ## Uninstall
 
