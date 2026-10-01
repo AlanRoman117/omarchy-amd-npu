@@ -62,7 +62,8 @@ Omarchy's plugin installer never runs code or sudo, which is why steps 2 and 3 a
 commands you run yourself.
 
 To update: `omarchy plugin update alanroman117.amd-npu`, then run `amd-npu enable` again so the
-service file is refreshed (the old one is kept as a backup if it changed).
+service files and the API proxy are refreshed (a changed unit's previous version is kept as one
+backup).
 
 ## Local models
 
@@ -120,11 +121,11 @@ doesn't repeat them.
 | `amd-npu install` | Installs `xrt`, `xrt-plugin-amdxdna` and `fastflowlm`, and lifts the memlock limit for your user session (sudo; reboot after) |
 | `amd-npu enable` | Downloads Whisper (620 MB), starts `amd-npu.service`, switches Voxtype to it (config backed up). Safe to re-run; migrates the older `flm-asr.service`. |
 | `amd-npu status [--json]` | Server, Whisper, firmware, Voxtype backend, last dictation, loaded model, memory |
-| `amd-npu doctor` | `status` plus a live transcription request |
+| `amd-npu doctor` | `status`, browser-protection checks, and a live transcription request |
 | `amd-npu ping` | Quiet Whisper check: `ok <seconds>` or `fail <reason>` |
 | `amd-npu models [--json]` | NPU LLMs FastFlowLM offers, with size, memory and download state |
 | `amd-npu pull <model>` | Download a model (asks first) |
-| `amd-npu load <model> [--exclusive] [--ctx N]` | Load next to Whisper, or alone with dictation on the CPU |
+| `amd-npu load <model> [--exclusive] [--ctx N]` | Load next to Whisper, or alone with dictation on the CPU. `--ctx` is `-1` (model default) or 512 and up; if the server won't start, the previous settings are restored |
 | `amd-npu unload` | Drop the model; Whisper only, dictation back on the NPU |
 | `amd-npu chat [model] [--think]` | Streaming terminal chat (`/reset`, `/exit`, Ctrl+C stops an answer) |
 | `amd-npu bench-llm [--raw]` | Measure the loaded model's generation speed |
@@ -138,9 +139,10 @@ doesn't repeat them.
   - `/etc/systemd/system/user@.service.d/90-amd-npu-memlock.conf`
   - `/etc/systemd/user.conf.d/90-amd-npu-memlock.conf`
   - `/etc/security/limits.d/90-amd-npu-memlock.conf`
-- **Service:** `~/.config/systemd/user/amd-npu.service` (`flm serve` on `127.0.0.1:52625`), with its
-  settings in `~/.config/amd-npu/server.env` (which model, Whisper on or off, context length,
-  browser access).
+- **Services:** `~/.config/systemd/user/amd-npu.service` (FastFlowLM on `127.0.0.1:6669`, sandboxed
+  so it can't write the models folder) and `amd-npu-proxy.service` (the API on `127.0.0.1:52625`,
+  running `~/.local/share/amd-npu/proxy.py`). Settings live in `~/.config/amd-npu/server.env`
+  (which model, Whisper on or off, context length, allowed browser origins).
 - **Models:** `~/.config/flm/models/`.
 - **Voxtype config:** in `~/.config/voxtype/config.toml`, `[whisper]` gets `backend = "remote"` and
   `remote_endpoint = "http://127.0.0.1:52625"`. The endpoint has no `/v1`; Voxtype adds it. NPU-only
@@ -154,16 +156,19 @@ doesn't repeat them.
   which puts Voxtype back on its CPU model.
 - **Don't force NPU firmware versions or install `amdxdna-dkms`** on a current kernel. A mismatch can
   make the NPU disappear.
-- **The server listens only on `127.0.0.1`, without authentication.** Anything running on this
-  machine, under any user, can use it. That's fine on a single-user laptop. On a shared machine,
-  another account could also take the port while the service is stopped.
-- **Web pages in your browser can still reach the server.** FastFlowLM enables CORS by default; the
-  service turns it off (`--cors 0`), so a page that sends JSON the normal way is refused. FastFlowLM
-  1.0.4 still marks every answer as readable from any site, and it accepts a request sent as plain
-  text. A page written to do that can still chat with the loaded model, read the answers, or name a
-  model and make the server download it. Closing that needs a fix in FastFlowLM. A browser-based
-  chat UI needs CORS back: add `FLM_CORS=1` to `~/.config/amd-npu/server.env` and run
-  `systemctl --user restart amd-npu`.
+- **The API on `127.0.0.1:52625` has no password.** Programs on this machine, under any user, can
+  use it. That's fine on a single-user laptop. On a shared machine, another account could also take
+  the port while the service is stopped.
+- **Web pages can't use it.** FastFlowLM itself listens on `127.0.0.1:6669`, a port browsers refuse
+  to connect to. The proxy on 52625 refuses requests from web pages (any origin not on your
+  allowlist), plain-text tricks, unexpected `Host` headers (DNS rebinding) and models that aren't
+  downloaded. It also strips FastFlowLM's "readable by any site" CORS header. `amd-npu doctor` checks
+  this. To let a browser-based chat UI in, list its origin in `~/.config/amd-npu/server.env`, e.g.
+  `AMD_NPU_ALLOWED_ORIGINS=http://localhost:8080`, then run `systemctl --user restart amd-npu`.
+- **Requests can't download models.** The server can read the models folder but not write it, so
+  downloads only happen through `amd-npu pull`. A program that calls FastFlowLM's port directly
+  with a missing model makes it hang instead (a FastFlowLM 1.0.4 bug); `systemctl --user restart
+  amd-npu` recovers.
 
 ## Uninstall
 

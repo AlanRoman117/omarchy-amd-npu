@@ -15,24 +15,26 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 | `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.amd-npu`: `open`, `close`, `toggle`, `refresh` |
 | `bin/amd-npu` | Setup, dictation and model commands (`amd-npu help`) |
 | `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin) |
-| `systemd/amd-npu.service` | User unit, copied by `enable`. Reads `~/.config/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`, `FLM_CORS`) |
+| `systemd/amd-npu.service` | FastFlowLM on `127.0.0.1:6669` (a browser "bad port"), `--cors 0`, sandboxed (`PrivateUsers=yes`, `ReadOnlyPaths=` the models dir). Reads `~/.config/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`). `Wants=` the proxy |
+| `lib/proxy.py` + `systemd/amd-npu-proxy.service` | The public API on `127.0.0.1:52625`. `enable` copies `proxy.py` to `~/.local/share/amd-npu/`. Refuses foreign `Origin`/`Sec-Fetch-Site` (allowlist: `AMD_NPU_ALLOWED_ORIGINS` in `server.env`), bad `Host`, non-JSON bodies on JSON endpoints, and models that aren't downloaded; strips upstream CORS headers; streams responses. `PartOf=amd-npu.service` |
 
 Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LLM + `FLM_ASR=1`),
 **exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `backend = "local"`, notifications both ways).
 
 ## Current state (2026-10-01)
 
-- Version 0.2.1. PRs #1-#9 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.3.0. PRs #1-#10 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - The maintainer's Z13 normally runs **Whisper only** (`FLM_LLM=` empty), with Voxtype on the NPU.
   `qwen3.5:0.8b` and `qwen3.5:4b` are downloaded for testing.
 - The installed plugin (`~/.config/omarchy/plugins/alanroman117.amd-npu/`) is a git clone of the
   public `main`. Keep it in sync after a merge with `omarchy plugin update alanroman117.amd-npu`.
   If `Widget.qml` changed, also run `omarchy restart shell`.
-- `/security-review` of the whole repo ran on 2026-09-30: no HIGH or MEDIUM findings. 0.2.1 turned
-  CORS off by default (`FLM_CORS=1` in `server.env` opts back in; `env_write` keeps it), which is
-  only partial in FastFlowLM 1.0.4 (see below). The rest (server auth, Host check, multi-user port
-  takeover) is under Hardening in `to-do.md`.
+- `/security-review` ran on 2026-09-30 (no HIGH or MEDIUM). 0.2.1's `--cors 0` turned out to be
+  partial in FastFlowLM 1.0.4, so 0.3.0 put FastFlowLM on browser-blocked port 6669 behind
+  `lib/proxy.py`, and made its models dir read-only. `FLM_CORS` is retired: `enable` drops it and
+  points at `AMD_NPU_ALLOWED_ORIGINS`. What's still upstream's job (an API token, the CORS/plain-text
+  and hang bugs) is in `to-do.md`.
 - Next up: the open items in `to-do.md` (test on another XDNA2 machine, a clean-install test, the
   plugin id prefix, the Omarchy Discussions pitch).
 
@@ -49,11 +51,14 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 - No unload endpoint: unloading restarts the server Whisper-only.
 - **With Whisper off, `/v1/audio/transcriptions` answers HTTP 200 with a body of `null`.** Check
   the body (`ping` does), not just the status.
-- **CORS is `*` by default and any `Host` header is accepted.** The unit passes `--cors ${FLM_CORS}`
-  (0 unless set), but in 1.0.4 that only drops the OPTIONS handler (preflight gets 404). Every
-  response still carries `Access-Control-Allow-Origin: *`, and a `text/plain` POST is parsed as
-  JSON, so a web page can still chat, read the answer and trigger model downloads. Upstream issue
-  is in `to-do.md`.
+- **CORS is `*` and any `Host` header is accepted, even with `--cors 0`** (which only drops the
+  OPTIONS handler). Every response carries `Access-Control-Allow-Origin: *`, and a `text/plain` POST
+  is parsed as JSON. Never expose FastFlowLM's own port to browsers: it stays on 6669, and the proxy
+  handles everything on 52625.
+- **With the models dir read-only, a request for a missing model hangs the whole server** (download
+  fails with "Read-only file system", then nothing answers, Whisper included; the unit stays
+  "active"). The proxy refuses such requests on 52625; `enable` and `load` run `flm pull` first
+  (20 ms when up to date) so an outdated model is refreshed outside the sandbox.
 - `/api/ps` returns an error JSON when no LLM is loaded (internal placeholder `model-faker`).
 - Speeds (`prefill_speed_tps`, `decoding_speed_tps`) come back in each response's `usage`, only to
   the caller.
@@ -70,7 +75,15 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
   `voxtype transcribe` logs **no** request in `journalctl --user -u amd-npu`. `unload` → Whisper pings
   and the Voxtype config is byte-identical again. `bench-llm` and piped `chat` answer.
 - Safety: `load` of a model that isn't downloaded, an unknown name, or `whisper-v3:turbo` must be
-  refused before any request is sent.
+  refused before any request is sent. `load --ctx 100` is refused. A load whose restart fails
+  restores the previous `server.env` (tested by hiding `~/.local/share/amd-npu/proxy.py`).
+- Proxy: `amd-npu doctor` covers foreign `Origin` → 403, `text/plain` → 415, no CORS header. The full
+  curl list: `Origin: null` and `Sec-Fetch-Site: cross-site` → 403; missing model in JSON, the Ollama
+  API or an audio upload → 404 with the models dir unchanged; bad `Host` → 421; foreign preflight →
+  403; an allow-listed origin gets 204/200 naming that origin. Browser check: serve a test page with
+  `python3 -m http.server` and load it in headless Chrome with a throwaway `--user-data-dir`. Fetches
+  to `:6669` fail in Chrome (unsafe port), and those to `:52625` show up as 403s in
+  `journalctl --user -u amd-npu-proxy`.
 - Card: `omarchy plugin validate <dir>`, then **`omarchy restart shell`**. The shell logs "reloading"
   when a plugin file changes but can keep running the old compiled QML. Open the card with
   `omarchy-shell alanroman117.amd-npu open` and screenshot each state (`grim -g`): Whisper only,
@@ -117,7 +130,10 @@ because only NPU dictations are counted.
   chip icon is `\udb81\ude1a` (U+F061A, nf-md-chip); the buttons use BMP Font Awesome glyphs.
 - `Dropdown` opens its own popup; inside the card that risks clipping, so the model picker is a
   button list.
-- **Never `pkill -f` a pattern that appears in your own command line.**
+- **Never `pkill -f` a pattern that appears in your own command line** (bit twice). Stop test servers
+  by port: `ss -ltnpH 'sport = :PORT'`.
+- **`lib/proxy.py` runs from `~/.local/share/amd-npu/`**, not the repo: re-run `amd-npu enable` after
+  changing it.
 
 ## Commits
 

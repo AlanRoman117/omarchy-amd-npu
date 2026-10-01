@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-VERSION=0.2.1
+VERSION=0.3.0
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
@@ -18,6 +18,10 @@ WHISPER="whisper-v3:turbo"
 WHISPER_DIR="$CONFIG_HOME/flm/models/Whisper-V3-Turbo-NPU2"
 UNIT="amd-npu.service"
 UNIT_FILE="$CONFIG_HOME/systemd/user/$UNIT"
+# Clients talk to the proxy on $PORT; FastFlowLM itself listens on 6669, which browsers refuse.
+PROXY_UNIT="amd-npu-proxy.service"
+PROXY_UNIT_FILE="$CONFIG_HOME/systemd/user/$PROXY_UNIT"
+PROXY_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/amd-npu"
 LEGACY_UNIT="flm-asr.service"
 STATE_DIR="$CONFIG_HOME/amd-npu"
 SERVER_ENV="$STATE_DIR/server.env"
@@ -163,11 +167,15 @@ env_get() {
   echo "${val:-$2}"
 }
 
-# env_write <llm> <asr 0|1> <ctx>. Keeps the user's FLM_CORS setting.
+# env_write <llm> <asr 0|1> <ctx>. Keeps the user's browser allowlist.
 env_write() {
-  local cors; cors=$(env_get FLM_CORS 0)
+  local origins; origins=$(env_get AMD_NPU_ALLOWED_ORIGINS "")
   mkdir -p "$STATE_DIR"
-  printf '# Written by amd-npu. FLM_LLM empty = Whisper only; FLM_ASR=0 = LLM has the NPU alone.\n# FLM_CORS=1 turns CORS on, for browser chat UIs (off by default).\nFLM_LLM=%s\nFLM_ASR=%s\nFLM_CTX=%s\nFLM_CORS=%s\n' "$1" "$2" "$3" "$cors" >"$SERVER_ENV"
+  printf '%s\n' \
+    "# Written by amd-npu. FLM_LLM empty = Whisper only; FLM_ASR=0 = LLM has the NPU alone." \
+    "# AMD_NPU_ALLOWED_ORIGINS: space-separated browser origins allowed to use the API" \
+    "# (e.g. http://localhost:8080). Empty = web pages are refused." \
+    "FLM_LLM=$1" "FLM_ASR=$2" "FLM_CTX=$3" "AMD_NPU_ALLOWED_ORIGINS=$origins" >"$SERVER_ENV"
 }
 
 # whisper | share | exclusive, from the saved settings
@@ -178,10 +186,15 @@ mode() {
   else echo share; fi
 }
 
-restart_server() {
+# Restarts FastFlowLM and the proxy (PartOf=), and waits for the API. Returns 1 on failure.
+try_restart_server() {
   systemctl --user daemon-reload
-  systemctl --user restart "$UNIT"
-  wait_for_server || die "The NPU server didn't come up (journalctl --user -u $UNIT)."
+  systemctl --user restart "$UNIT" "$PROXY_UNIT" 2>/dev/null || return 1
+  wait_for_server
+}
+
+restart_server() {
+  try_restart_server || die "The NPU server didn't come up (journalctl --user -u $UNIT -u $PROXY_UNIT)."
 }
 
 # --- models -----------------------------------------------------------------
@@ -281,6 +294,18 @@ cmd_install() {
   echo "Reboot, then run: amd-npu enable"
 }
 
+# install_unit <name> <destination>: copies a unit from the repo. When it replaces a different
+# version, the old one is kept as a single .bak (older backups are pruned).
+install_unit() {
+  mkdir -p "$(dirname "$2")"
+  if [[ -f $2 ]] && ! cmp -s "$2" "$ROOT/systemd/$1"; then
+    rm -f "$2".bak.*
+    backup "$2"
+    note "Updated $1 (previous version kept as a .bak)"
+  fi
+  cp "$ROOT/systemd/$1" "$2"
+}
+
 # Replaces the 0.1 service (flm-asr.service) with amd-npu.service.
 migrate_legacy_unit() {
   local legacy="$CONFIG_HOME/systemd/user/$LEGACY_UNIT"
@@ -302,23 +327,27 @@ cmd_enable() {
   ok "$(grep -o 'NPU FW Version: .*' <<<"$validation")"
 
   step "Whisper model"
-  if [[ -d $WHISPER_DIR ]]; then ok "$WHISPER already downloaded"; else flm pull "$WHISPER"; fi
+  # Pulling also refreshes an outdated model, which the sandboxed server can't do itself.
+  if [[ -d $WHISPER_DIR ]]; then flm pull "$WHISPER" >/dev/null 2>&1 || true; ok "$WHISPER present"; else flm pull "$WHISPER"; fi
 
   step "Service"
   migrate_legacy_unit
-  # Dictation needs Whisper on the NPU: an exclusive LLM becomes shared.
-  if [[ ! -f $SERVER_ENV ]]; then env_write "" 1 -1
-  elif [[ $(env_get FLM_ASR 1) == 0 ]]; then env_write "$(env_get FLM_LLM "")" 1 "$(env_get FLM_CTX -1)"; fi
-  mkdir -p "$(dirname "$UNIT_FILE")"
-  if [[ -f $UNIT_FILE ]] && ! cmp -s "$UNIT_FILE" "$ROOT/systemd/$UNIT"; then
-    backup "$UNIT_FILE"
-    note "Updated $UNIT (backup kept next to it)"
+  local legacy_cors; legacy_cors=$(env_get FLM_CORS 0)
+  # Rewritten every time: dictation needs Whisper on (an exclusive LLM becomes shared), and
+  # settings from older versions (FLM_CORS) are dropped.
+  env_write "$(env_get FLM_LLM "")" 1 "$(env_get FLM_CTX -1)"
+  if [[ $legacy_cors == 1 ]]; then
+    note "FLM_CORS=1 is retired. To let a browser chat UI in, list its origin in $SERVER_ENV:"
+    note "  AMD_NPU_ALLOWED_ORIGINS=http://localhost:8080"
   fi
-  cp "$ROOT/systemd/$UNIT" "$UNIT_FILE"
+  install_unit "$UNIT" "$UNIT_FILE"
+  install_unit "$PROXY_UNIT" "$PROXY_UNIT_FILE"
+  mkdir -p "$PROXY_DIR"
+  cp "$ROOT/lib/proxy.py" "$PROXY_DIR/proxy.py"
   systemctl --user daemon-reload
   systemctl --user enable "$UNIT" >/dev/null 2>&1
   restart_server
-  ok "$UNIT running on $URL ($(mode))"
+  ok "Running; API on $URL ($(mode)), FastFlowLM behind it on 127.0.0.1:6669"
 
   step "Voxtype"
   if [[ -f $VOXTYPE_CONFIG ]]; then
@@ -335,7 +364,8 @@ cmd_enable() {
 }
 
 cmd_status_json() {
-  local service=inactive server=false whisper_dl=false llm="" llm_info="null"
+  local service=inactive server=false proxy=inactive
+  systemctl --user is-active --quiet "$PROXY_UNIT" && proxy=active whisper_dl=false llm="" llm_info="null"
   systemctl --user is-active --quiet "$UNIT" && service=active
   [[ -f $UNIT_FILE ]] || service=missing
   server_up && server=true
@@ -344,13 +374,13 @@ cmd_status_json() {
   [[ -n $llm ]] && llm_info=$(model_info "$llm")
   [[ -z $llm_info ]] && llm_info="null"
   jq -nc \
-    --arg service "$service" --argjson server "$server" --argjson model "$whisper_dl" \
+    --arg service "$service" --arg proxy "$proxy" --argjson server "$server" --argjson model "$whisper_dl" \
     --arg firmware "$(npu_firmware)" --arg backend "$(voxtype_backend)" \
     --arg last "$(last_latency)" --arg modelName "$WHISPER" --arg url "$URL" \
     --arg mode "$(mode)" --arg llm "$llm" --argjson llmInfo "$llm_info" \
     --argjson rss "$(server_rss_mb)" --argjson npuMb "$(server_npu_mb)" --argjson ctx "$(env_get FLM_CTX -1)" \
     --argjson models "$(models_json | jq -c '[.[] | select(.installed) | {name, params, footprint}]')" \
-    '{service: $service, server: $server, model: $model, modelName: $modelName, url: $url,
+    '{service: $service, proxy: $proxy, server: $server, model: $model, modelName: $modelName, url: $url,
       firmware: $firmware, backend: $backend, last: $last, mode: $mode, rssMb: $rss, npuMb: $npuMb,
       llm: (if $llm == "" then null else ($llmInfo + {name: $llm, ctxSetting: $ctx}) end),
       downloaded: $models}'
@@ -370,6 +400,7 @@ cmd_status() {
   local ready=0
   step "AMD NPU status"
   if systemctl --user is-active --quiet "$UNIT"; then ok "$UNIT active"; else bad "$UNIT not running"; ready=1; fi
+  if systemctl --user is-active --quiet "$PROXY_UNIT"; then ok "$PROXY_UNIT active (web pages refused)"; else bad "$PROXY_UNIT not running"; ready=1; fi
   if server_up; then ok "Server answering on $URL"; else bad "Server not answering on $URL"; ready=1; fi
   if [[ -d $WHISPER_DIR ]]; then ok "Whisper model $WHISPER present"; else bad "Whisper model $WHISPER not downloaded"; ready=1; fi
   local fw; fw=$(npu_firmware)
@@ -420,10 +451,21 @@ cmd_ping() {
 cmd_doctor() {
   cmd_check || true
   cmd_status || true
+  local fail=0
+  step "Browser protection"
+  local code headers
+  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Origin: https://example.com' "$URL/api/version" || true)
+  if [[ $code == 403 ]]; then ok "A web page's request is refused (403)"; else bad "A web page's request got HTTP $code (expected 403)"; fail=1; fi
+  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Content-Type: text/plain' -d '{}' "$URL/v1/chat/completions" || true)
+  if [[ $code == 415 ]]; then ok "A plain-text POST is refused (415)"; else bad "A plain-text POST got HTTP $code (expected 415)"; fail=1; fi
+  headers=$(curl -s -m 5 -D - -o /dev/null "$URL/api/version" || true)
+  if grep -qi '^access-control-allow-origin' <<<"$headers"; then bad "Responses still carry a CORS header"; fail=1; else ok "No wildcard CORS header on responses"; fi
+
   step "Live request"
-  if [[ $(mode) == exclusive ]]; then note "Whisper is off while an LLM has the NPU alone"; return 0; fi
+  if [[ $(mode) == exclusive ]]; then note "Whisper is off while an LLM has the NPU alone"; return $fail; fi
   local result; result=$(cmd_ping || true)
   if [[ $result == ok* ]]; then ok "Transcription endpoint OK (1 s of silence in ${result#ok }s)"; else bad "Transcription request failed (HTTP ${result#fail })"; return 1; fi
+  return $fail
 }
 
 cmd_models() {
@@ -461,11 +503,15 @@ cmd_load() {
     shift
   done
   [[ -n $m ]] || die "Usage: amd-npu load <model> [--exclusive] [--ctx N]"
-  [[ $ctx =~ ^-?[0-9]+$ ]] || die "--ctx needs a whole number (-1 = the model's default)"
+  # FastFlowLM's minimum context is 512; a value it rejects would stop the server.
+  [[ $ctx == -1 || ( $ctx =~ ^[0-9]{3,7}$ && $ctx -ge 512 ) ]] || die "--ctx must be -1 (the model's default) or a whole number from 512 up"
   require_downloaded_llm "$m"
-  local prev prev_ctx
+  # Refresh an outdated model here: the sandboxed server can't download it, and would hang trying.
+  flm pull "$m" >/dev/null 2>&1 || true
+  local prev prev_ctx saved_env
   prev=$(mode)
   prev_ctx=$(env_get FLM_CTX -1)
+  saved_env=$(cat "$SERVER_ENV" 2>/dev/null || true)
 
   if (( exclusive )); then
     step "Load $m on the NPU alone"
@@ -473,7 +519,7 @@ cmd_load() {
     echo "  Run 'amd-npu unload' (or use the bar card) to bring Whisper back."
     confirm "Continue?" || exit 1
     env_write "$m" 0 "$ctx"
-    restart_server
+    restart_or_rollback "$m" "$saved_env"
     voxtype_use local
     ok "$m has the NPU; dictation is on the CPU"
     notify "Dictation is on the CPU" "$m is using the NPU. Unload it to bring Whisper back."
@@ -485,8 +531,8 @@ cmd_load() {
     if [[ $prev != exclusive && $ctx == "$prev_ctx" ]] && systemctl --user is-active --quiet "$UNIT" && server_up && warm_llm "$m"; then
       ok "Swapped to $m without restarting Whisper"
     else
-      restart_server
-      warm_llm "$m" || die "$m failed to load (journalctl --user -u $UNIT)."
+      restart_or_rollback "$m" "$saved_env"
+      warm_llm "$m" || rollback_and_die "$m" "$saved_env"
       ok "$m loaded"
     fi
     # A failed or odd load can reset the NPU device and take Whisper with it.
@@ -504,6 +550,19 @@ cmd_load() {
   refresh_widget
   echo
   echo "API: $URL/v1 (model \"$m\")   Chat: amd-npu chat"
+}
+
+# If the server won't come up with the new settings, put the previous server.env back,
+# restart with it, and stop with an error, so a bad load never leaves the service down.
+rollback_and_die() {
+  printf '%s\n' "$2" >"$SERVER_ENV"
+  try_restart_server || true
+  refresh_widget
+  die "$1 didn't start on the NPU; previous settings restored (journalctl --user -u $UNIT)."
+}
+
+restart_or_rollback() {
+  try_restart_server || rollback_and_die "$1" "$2"
 }
 
 cmd_unload() {
@@ -566,9 +625,10 @@ cmd_disable() {
 cmd_remove() {
   cmd_disable
   step "Remove"
-  rm -f "$UNIT_FILE"
+  rm -f "$UNIT_FILE" "$PROXY_UNIT_FILE"
+  rm -rf "$PROXY_DIR"
   systemctl --user daemon-reload
-  ok "Removed $UNIT"
+  ok "Removed $UNIT and $PROXY_UNIT"
   if [[ -d $WHISPER_DIR ]] && confirm "Delete the Whisper model ($(du -sh "$WHISPER_DIR" | cut -f1))?"; then
     rm -rf "$WHISPER_DIR"
     ok "Whisper model deleted"
@@ -612,7 +672,8 @@ Local models
                         Chat in the terminal with the loaded model
   bench-llm [--raw]     Measure the loaded model's generation speed
 
-API while a model is loaded: $URL/v1 (OpenAI) and $URL/api (Ollama)
+API while a model is loaded: $URL/v1 (OpenAI) and $URL/api (Ollama).
+Web pages are refused unless their origin is in AMD_NPU_ALLOWED_ORIGINS ($SERVER_ENV).
 EOF
 }
 

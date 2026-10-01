@@ -17,16 +17,20 @@
       `user@.service.d` version. Reboot and verify `flm validate`.
 
 ## Hardening (optional, from the 2026-09-30 security review)
-- [x] CORS off in the unit (`--cors ${FLM_CORS}`, 0 unless `FLM_CORS=1` in `server.env`), since
-      0.2.1. Browser-only chat UIs opt in. In 1.0.4 this only removes the preflight answer.
-- [ ] Report upstream: with `--cors 0`, FastFlowLM 1.0.4 still sends `Access-Control-Allow-Origin: *`
-      on every response and parses `text/plain` bodies as JSON. So a page can still send a "simple"
-      POST to `/v1/chat/completions`, read the answer, and make the server download any model it
-      names. Fix: no CORS headers with `--cors 0`, and require `Content-Type: application/json`.
+- [x] 0.3.0: FastFlowLM on browser-blocked port 6669 behind `lib/proxy.py` on 52625 (refuses
+      foreign origins, bad `Host`, plain-text bodies, missing models; strips CORS), and its models
+      dir read-only. Supersedes 0.2.1's `--cors 0`, which FastFlowLM 1.0.4 only half honours.
+- [ ] **For later, report upstream** (FastFlowLM 1.0.4):
+      - with `--cors 0` it still sends `Access-Control-Allow-Origin: *` on every response and parses
+        `text/plain` bodies as JSON. Fix: no CORS headers with `--cors 0`, and require
+        `Content-Type: application/json`.
+      - a request naming a catalog model triggers a download; when the download fails (e.g. a
+        read-only models dir), the server hangs and stops answering everything, Whisper included.
+        Fix: refuse unknown or missing models with an error, or add an opt-out of request-triggered
+        downloads.
 - [ ] Ask FastFlowLM upstream for an API key / token on `flm serve` (1.0.4 has none), so other
-      local processes can't use the server, plus a Host header check against DNS rebinding (1.0.4
-      accepts any Host). If a token lands, set it in `server.env` and pass it from Voxtype and
-      `amd-npu`.
+      local processes can't use the server. The proxy now checks `Host` (DNS rebinding) and could
+      also require a token once Voxtype and `amd-npu` send one.
 - [ ] Multi-user machines: another account could bind 52625 while the service is down and
       receive dictation audio. Only matters if multi-user setups become a supported case.
 
