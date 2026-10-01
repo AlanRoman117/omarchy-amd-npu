@@ -55,7 +55,10 @@ omarchy plugin add https://github.com/AlanRoman117/omarchy-amd-npu.git --enable
 ~/.config/omarchy/plugins/alanroman117.amd-npu/bin/amd-npu enable
 ```
 
-Then **hold F9** (or **Super + Ctrl + X**) to dictate, as usual. Tip: add the CLI to your path with
+Then **hold F9** (or **Super + Ctrl + X**) to dictate, as usual. Voxtype stops recording after 60 s by
+default (Omarchy's setting). For longer dictation, raise `max_duration_secs` in
+`~/.config/voxtype/config.toml` (e.g. `300`) and run `systemctl --user restart voxtype`. The NPU
+transcribes a minute of speech in about 9 s, and `amd-npu` gives Voxtype a 180 s timeout. Tip: add the CLI to your path with
 `ln -s ~/.config/omarchy/plugins/alanroman117.amd-npu/bin/amd-npu ~/.local/bin/`.
 
 Omarchy's plugin installer never runs code or sudo, which is why steps 2 and 3 are separate
@@ -145,7 +148,7 @@ doesn't repeat them.
   (which model, Whisper on or off, context length, allowed browser origins).
 - **Models:** `~/.config/flm/models/`.
 - **Voxtype config:** in `~/.config/voxtype/config.toml`, `[whisper]` gets `backend = "remote"` and
-  `remote_endpoint = "http://127.0.0.1:52625"`. The endpoint has no `/v1`; Voxtype adds it. NPU-only
+  `remote_endpoint = "http://127.0.0.1:52625"` (plus `remote_model` and a 180 s `remote_timeout_secs`). The endpoint has no `/v1`; Voxtype adds it. NPU-only
   mode sets `backend = "local"` until you unload.
 
 ## Good to know
