@@ -113,8 +113,18 @@ power panels:
 - **Dictation:** Whisper model, NPU firmware, where Voxtype sends audio, **Test dictation** and
   **Full status**.
 
-Recording and transcribing are already shown by Omarchy's built-in dictation indicator, so the card
-doesn't repeat them.
+**While you hold F9**, a countdown shows how long you can keep talking before Voxtype's recording
+limit (`max_duration_secs`):
+- **On-screen overlay:** a mic icon, a bar that drains, and "4:37 left". In the last 15 seconds it
+  reads "0:12 left - finishing soon".
+- **The chip in the bar** turns into the time, and switches to the warning colour near the end.
+- **After you let go,** the overlay says "Transcribing..." until the text arrives.
+
+Omarchy's overlay sits at the bottom centre, where Voxtype draws its own waveform. To stack them
+(waveform above, countdown below), raise Voxtype's: `voxtype config set osd.top_margin 0.78`, then
+`systemctl --user restart voxtype`.
+
+Recording and transcribing states are also shown by Omarchy's built-in dictation indicator.
 
 ## Commands
 

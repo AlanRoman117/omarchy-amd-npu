@@ -23,7 +23,7 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 
 ## Current state (2026-10-01)
 
-- Version 0.3.0. PRs #1-#10 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.4.0. PRs #1-#12 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - The maintainer's Z13 normally runs **Whisper only** (`FLM_LLM=` empty), with Voxtype on the NPU.
   `qwen3.5:0.8b` and `qwen3.5:4b` are downloaded for testing.
@@ -132,6 +132,18 @@ because only NPU dictations are counted.
   button list.
 - **Never `pkill -f` a pattern that appears in your own command line** (bit twice). Stop test servers
   by port: `ss -ltnpH 'sport = :PORT'`.
+- **Dictation countdown (`Widget.qml`):** follows `voxtype status --follow --format json` (run
+  under `setpriv --pdeathsig TERM`, as Omarchy does) and reads `max_duration_secs` from the
+  Voxtype config with a watched `FileView`. It drives Omarchy's OSD via
+  `omarchy-shell -q osd show <json>`. The OSD draws its bar **only when `message` is empty**, so the
+  time goes in `progressText`. The OSD is pinned bottom-centre, the same spot as Voxtype's waveform,
+  so the README suggests `voxtype config set osd.top_margin 0.78`. Each bar instance (one per
+  monitor) drives the OSD, which is harmless (same payload) but duplicated.
+- **Testing the countdown without typing into a window:** `voxtype record start`, screenshot,
+  then `voxtype record cancel` (discards). For the "Transcribing..." state, `voxtype record stop`,
+  screenshot within ~0.3 s, then `cancel`; check the journal says "Transcription cancelled". To see
+  the warning state, temporarily lower `max_duration_secs` in the file. The card re-reads it, but
+  the running daemon keeps its old limit until restarted, so it won't auto-stop and type.
 - **`lib/proxy.py` runs from `~/.local/share/amd-npu/`**, not the repo: re-run `amd-npu enable` after
   changing it.
 
