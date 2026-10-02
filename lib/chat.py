@@ -21,6 +21,9 @@ except ImportError:
     pass
 
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
+# The input prompt marks its colour codes as invisible (\001...\002). Otherwise readline counts them
+# as text and wraps a long line in the wrong place, redrawing it over itself.
+PROMPT = f"\001{BOLD}\002you ›\001{RESET}\002 "
 
 
 def stream(url, model, messages, think):
@@ -55,7 +58,7 @@ def main():
     messages = []
     while True:
         try:
-            prompt = input(f"{BOLD}you ›{RESET} ").strip()
+            prompt = input(PROMPT).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
