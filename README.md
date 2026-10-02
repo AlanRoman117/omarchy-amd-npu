@@ -45,15 +45,20 @@ welcome.
 ## Install
 
 ```bash
-# 1. The bar card (an Omarchy shell plugin; lands disabled so you can review it)
 omarchy plugin add https://github.com/AlanRoman117/omarchy-amd-npu.git --enable
-
-# 2. The NPU runtime (sudo), then reboot
-~/.config/omarchy/plugins/alanroman117.amd-npu/bin/amd-npu install
-
-# 3. After the reboot: download Whisper, start the NPU server, point Voxtype at it
-~/.config/omarchy/plugins/alanroman117.amd-npu/bin/amd-npu enable
 ```
+
+Then click the dimmed chip in the bar. The card walks you through setup:
+
+<img src="docs/screenshots/card-setup.png" width="300" alt="Card before setup: NOT SET UP, what setup installs, Set up and Check buttons">
+
+1. **Set up** opens a terminal that installs the NPU runtime (it asks for your password).
+2. **Restart** the computer.
+3. **Finish setup** downloads Whisper, starts the NPU server and points Voxtype at it.
+
+On a machine without an XDNA2 NPU the chip stays hidden. Prefer the terminal? The same steps are
+`amd-npu install`, a reboot, then `amd-npu enable`, run from
+`~/.config/omarchy/plugins/alanroman117.amd-npu/bin/`.
 
 Then **hold F9** (or **Super + Ctrl + X**) to dictate, as usual. Voxtype stops recording after 60 s by
 default (Omarchy's setting). For longer dictation, raise `max_duration_secs` in
@@ -61,8 +66,8 @@ default (Omarchy's setting). For longer dictation, raise `max_duration_secs` in
 transcribes a minute of speech in about 9 s, and `amd-npu` gives Voxtype a 180 s timeout. Tip: add the CLI to your path with
 `ln -s ~/.config/omarchy/plugins/alanroman117.amd-npu/bin/amd-npu ~/.local/bin/`.
 
-Omarchy's plugin installer never runs code or sudo, which is why steps 2 and 3 are separate
-commands you run yourself.
+Omarchy's plugin installer never runs code or sudo, which is why setup is a separate step you
+start yourself.
 
 To update: `omarchy plugin update alanroman117.amd-npu`, then run `amd-npu enable` again so the
 service files and the API proxy are refreshed (a changed unit's previous version is kept as one
@@ -125,9 +130,9 @@ limit (`max_duration_secs`):
 - **The chip in the bar** turns into the time, and switches to the warning colour near the end.
 - **After you let go,** the overlay says "Transcribing..." until the text arrives.
 
-Omarchy's overlay sits at the bottom centre, where Voxtype draws its own waveform. To stack them
-(waveform above, countdown below), raise Voxtype's: `voxtype config set osd.top_margin 0.78`, then
-`systemctl --user restart voxtype`.
+The countdown places itself just above Voxtype's waveform, wherever Voxtype's `[osd]` settings put
+it (below it if the waveform is near the top, Omarchy's usual overlay spot if it's in a corner), so
+nothing needs moving. With more than one monitor it shows on the focused one, like the waveform.
 
 Recording and transcribing states are also shown by Omarchy's built-in dictation indicator.
 
@@ -136,6 +141,7 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | Command | What it does |
 |---|---|
 | `amd-npu check` | Is this machine supported, and what's installed? |
+| `amd-npu setup-state` | One word for the bar card: `unsupported`, `driver`, `install`, `reboot`, `enable` or `installed` |
 | `amd-npu install` | Installs `xrt`, `xrt-plugin-amdxdna` and `fastflowlm`, and lifts the memlock limit for your user session (sudo; reboot after) |
 | `amd-npu enable` | Downloads Whisper (620 MB), starts `amd-npu.service`, switches Voxtype to it (config backed up). Safe to re-run; migrates the older `flm-asr.service`. |
 | `amd-npu status [--json]` | Server, Whisper, firmware, Voxtype backend, last dictation, loaded model, memory |

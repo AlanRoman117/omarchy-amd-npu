@@ -12,6 +12,7 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 | Path | Role |
 |---|---|
 | `manifest.json` | Plugin manifest (`alanroman117.amd-npu`, `bar-widget`) |
+| `CountdownOverlay.qml` | The dictation countdown: its own layer-shell window (namespace `amd-npu-countdown`) in Omarchy's OSD style, placed above Voxtype's waveform |
 | `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.amd-npu`: `open`, `close`, `toggle`, `refresh`, `chat`. Chat opens a plain floating terminal (`xdg-terminal-exec --app-id=org.omarchy.terminal`), not `omarchy-launch-floating-terminal-with-presentation`, whose logo and "press any key" don't suit a chat |
 | `bin/amd-npu` | Setup, dictation and model commands (`amd-npu help`) |
 | `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin). Turns readline's bracketed paste back on (Python disables it), so a multi-line paste is one message; test with a pty sending `ESC[200~...ESC[201~` |
@@ -21,10 +22,16 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LLM + `FLM_ASR=1`),
 **exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `backend = "local"`, notifications both ways).
 
-## Current state (2026-10-01)
+## Current state (2026-10-02)
 
-- Version 0.4.0. PRs #1-#12 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.6.0. PRs #1-#15 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
+- **This is already the "proper" plugin.** Omarchy has no plugin store or registry: a plugin is a
+  git repo with `manifest.json`, installed with `omarchy plugin add <git url>`, and sharing means
+  posting that line (Omarchy Discussions, Discord). Omarchy never runs plugin install hooks or
+  sudo, and plugins land disabled, so the card guides setup instead (see the setup states below).
+- The maintainer's Voxtype config has **no `[osd]` section** (default `top_margin` 0.85) since
+  0.6.0; the countdown positions itself.
 - The maintainer's Z13 normally runs **Whisper only** (`FLM_LLM=` empty), with Voxtype on the NPU.
   `qwen3.5:0.8b` and `qwen3.5:4b` are downloaded for testing.
 - The installed plugin (`~/.config/omarchy/plugins/alanroman117.amd-npu/`) is a git clone of the
@@ -36,7 +43,7 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
   points at `AMD_NPU_ALLOWED_ORIGINS`. What's still upstream's job (an API token, the CORS/plain-text
   and hang bugs) is in `to-do.md`.
 - Next up: the open items in `to-do.md` (test on another XDNA2 machine, a clean-install test, the
-  plugin id prefix, the Omarchy Discussions pitch).
+  Omarchy Discussions pitch).
 
 ## FastFlowLM behaviour this relies on (1.0.4, read from `src/server/rest_handler.cpp`)
 
@@ -96,8 +103,8 @@ clone once installed with `omarchy plugin add`). Edits here don't reach it until
 
 ## README screenshots (`docs/screenshots/`)
 
-Three card states: `card-whisper.png`, `card-share.png` (qwen3.5:4b shared) and `card-exclusive.png`.
-To retake them:
+Card states: `card-whisper.png`, `card-share.png` and `card-exclusive.png` (qwen3.5:0.8b, retaken in
+0.5.0 in a light theme), plus `card-setup.png` (the `install` setup state, 0.6.0). To retake them:
 
 1. Put the server in the state (`amd-npu load qwen3.5:4b [--exclusive --yes]`). After an
    exclusive switch, wait ~10 s for the desktop notification to clear before capturing.
@@ -110,7 +117,9 @@ To retake them:
    the card share the colour.
 4. Check for privacy (only the card in frame, no PNG metadata) and keep the files small.
 
-The current shots are 1x (about 380 px wide), taken on a 1080p external display. The Z13's own screen
+The current shots are 1x (376 px wide), taken on the Z13 with `grim -s 1` (logical pixels) and cropped
+just inside the card's border. Never put a countdown screenshot in the README without checking what's
+behind it: the overlay is transparent around the card, and terminal text shows through. The Z13's own screen
 (scale 2) gives sharper ones. In exclusive mode, LAST DICTATION reads "-" right after the switch,
 because only NPU dictations are counted.
 
@@ -134,16 +143,30 @@ because only NPU dictations are counted.
   by port: `ss -ltnpH 'sport = :PORT'`.
 - **Dictation countdown (`Widget.qml`):** follows `voxtype status --follow --format json` (run
   under `setpriv --pdeathsig TERM`, as Omarchy does) and reads `max_duration_secs` from the
-  Voxtype config with a watched `FileView`. It drives Omarchy's OSD via
-  `omarchy-shell -q osd show <json>`. The OSD draws its bar **only when `message` is empty**, so the
-  time goes in `progressText`. The OSD is pinned bottom-centre, the same spot as Voxtype's waveform,
-  so the README suggests `voxtype config set osd.top_margin 0.78`. Each bar instance (one per
-  monitor) drives the OSD, which is harmless (same payload) but duplicated.
+  Voxtype config with a watched `FileView` (`parseVoxtypeConfig`: `[audio] max_duration_secs` and
+  the `[osd]` keys). It no longer uses Omarchy's OSD, which is pinned bottom-centre with no position
+  option and overlapped Voxtype's waveform at the default `top_margin` 0.85. `CountdownOverlay.qml`
+  places its own card instead. Voxtype's rule, measured with `hyprctl layers -j` during
+  `record start`: for any centred position the waveform is at
+  `y = clamp(H * top_margin, margin_px, H - height_px - margin_px)` in logical pixels from the very
+  top of the screen (0.78 → y 780 on a 1000 px high screen). The countdown goes 8 px above it, or
+  below it if there's no room; for a corner position, or `[osd] enabled = false`, it takes Omarchy's
+  OSD spot (`Style.space(67)` from the bottom). Only the bar instance on `Hyprland.focusedMonitor`
+  shows it.
+- **Setup states:** when `amd-npu.service` doesn't exist, the probe asks `amd-npu setup-state`:
+  `unsupported` (chip hidden), `driver`, `install`, `reboot` (`ulimit -l` isn't unlimited yet),
+  `enable`, or `installed`. The card shows a short explanation, plus Set up / Finish setup / Check
+  buttons that open `amd-npu install|enable|check` in a floating terminal. To screenshot a state,
+  temporarily prefix the installed copy's `probe` with `echo <state>; exit;`, restart the shell, then
+  copy the repo's `Widget.qml` back.
 - **Testing the countdown without typing into a window:** `voxtype record start`, screenshot,
   then `voxtype record cancel` (discards). For the "Transcribing..." state, `voxtype record stop`,
   screenshot within ~0.3 s, then `cancel`; check the journal says "Transcription cancelled". To see
   the warning state, temporarily lower `max_duration_secs` in the file. The card re-reads it, but
-  the running daemon keeps its old limit until restarted, so it won't auto-stop and type.
+  the running daemon keeps its old limit until restarted, so it won't auto-stop and type. To test
+  placement, add a temporary `[osd]` block (`top_margin = 0.5`; `position = "top-center"` with
+  `top_margin = 0.05`; `position = "bottom-right"`), restart Voxtype, then `record start` and
+  `cancel`, and restore the file.
 - **`lib/proxy.py` runs from `~/.local/share/amd-npu/`**, not the repo: re-run `amd-npu enable` after
   changing it.
 
