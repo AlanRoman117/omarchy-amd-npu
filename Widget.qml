@@ -122,6 +122,13 @@ Panel {
     bar.run("omarchy-launch-floating-terminal-with-presentation " + quote(cli) + " status")
   }
 
+  // A plain floating terminal: the presentation wrapper's logo and "press any key" don't suit a chat.
+  function openChat() {
+    if (!bar || busy !== "") return
+    close()
+    bar.run("setsid uwsm-app -- xdg-terminal-exec --app-id=org.omarchy.terminal --title=" + quote("AMD NPU chat") + " -e " + quote(cli) + " chat")
+  }
+
   function statusCaption() {
     if (busy === "load") return "LOADING MODEL..."
     if (busy === "unload") return "UNLOADING..."
@@ -218,6 +225,7 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): void { root.refreshAll() }
+    function chat(): void { root.openChat() }
   }
 
   onOpenedChanged: {
@@ -569,7 +577,7 @@ Panel {
               id: llmActions
               width: parent.width
               spacing: Style.space(6)
-              readonly property real cellWidth: (width - spacing) / 2
+              readonly property real cellWidth: (width - 2 * spacing) / 3
 
               Button {
                 width: llmActions.cellWidth
@@ -580,6 +588,18 @@ Panel {
                 fontFamily: root.bar.fontFamily
                 bordered: true
                 onClicked: root.testLlm()
+              }
+
+              Button {
+                width: llmActions.cellWidth
+                iconText: "\uf086"
+                text: "Chat"
+                tooltipText: "Chat with the model in a terminal"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                onClicked: root.openChat()
               }
 
               Button {
