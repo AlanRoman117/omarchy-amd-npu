@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "alanroman117.amd-npu",
   "name": "AMD NPU",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "author": "Alan Roman",
   "license": "MIT",
   "description": "Dictation (Whisper) and small local LLMs on the AMD XDNA2 NPU, with a status card.",

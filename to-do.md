@@ -3,7 +3,8 @@
 ## Before announcing it
 - [ ] Test on at least one more XDNA2 machine (Strix Point laptop, Framework 13 AMD AI 300, …).
 - [ ] Test a clean install end to end: `install` → reboot → `enable` on a machine with no earlier setup.
-- [ ] Decide whether the plugin id keeps the `alanroman117.` prefix.
+- [x] Plugin id keeps the `alanroman117.` prefix: it's Omarchy's own `<username>.<id>` convention
+      (`omarchy plugin clone`), and `omarchy.` is reserved for first-party plugins.
 
 ## Upstream idea
 - [ ] Post to Omarchy Discussions → Suggestions: an NPU option in `omarchy voxtype install`,
