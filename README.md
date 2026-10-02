@@ -101,17 +101,22 @@ power panels:
 
 | Whisper only | Sharing with an LLM | LLM on the NPU alone |
 |:---:|:---:|:---:|
-| <img src="docs/screenshots/card-whisper.png" width="260" alt="Card with Whisper only: dictation on the NPU, downloaded models listed with Share / NPU only and Load"> | <img src="docs/screenshots/card-share.png" width="260" alt="Card with qwen3.5:4b loaded next to Whisper: model details, memory, API address, Test LLM and Unload"> | <img src="docs/screenshots/card-exclusive.png" width="260" alt="Card with qwen3.5:4b on the NPU alone: dictation switch off, Voxtype on its CPU model"> |
+| <img src="docs/screenshots/card-whisper.png" width="260" alt="Card with Whisper only: dictation on the NPU, downloaded models listed with Share / NPU only and Load"> | <img src="docs/screenshots/card-share.png" width="260" alt="Card with qwen3.5:0.8b loaded next to Whisper: model details, memory, API address, Test LLM, Chat and Unload"> | <img src="docs/screenshots/card-exclusive.png" width="260" alt="Card with qwen3.5:0.8b on the NPU alone: dictation switch off, Voxtype on its CPU model"> |
 
 - **Header:** READY, READY + LLM, LLM ONLY, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
   your last dictation time.
 - **Dictate on the NPU:** a switch. In NPU-only mode, switching it on moves the model to share mode
   and brings Whisper back.
 - **Local model:** when loaded, its name, size, mode, memory (NPU buffers + process) and API address,
-  with **Test LLM** (generation speed) and **Unload**. When nothing is loaded, your downloaded models,
+  with **Test LLM** (generation speed), **Chat** and **Unload**. When nothing is loaded, your downloaded models,
   a Share / NPU only choice, and **Load** (NPU only asks you to confirm first).
 - **Dictation:** Whisper model, NPU firmware, where Voxtype sends audio, **Test dictation** and
   **Full status**.
+
+**Chat** opens a floating terminal with `amd-npu chat` for a quick question or a short summary:
+paste the text (newlines and all, it goes as one message) and ask. `/exit` or Ctrl+D closes the
+window. It's a local terminal client, so the browser protection below stays as it is. To open it
+from a key, bind `omarchy-shell alanroman117.amd-npu chat`.
 
 **While you hold F9**, a countdown shows how long you can keep talking before Voxtype's recording
 limit (`max_duration_secs`):
@@ -140,7 +145,7 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | `amd-npu pull <model>` | Download a model (asks first) |
 | `amd-npu load <model> [--exclusive] [--ctx N]` | Load next to Whisper, or alone with dictation on the CPU. `--ctx` is `-1` (model default) or 512 and up; if the server won't start, the previous settings are restored |
 | `amd-npu unload` | Drop the model; Whisper only, dictation back on the NPU |
-| `amd-npu chat [model] [--think]` | Streaming terminal chat (`/reset`, `/exit`, Ctrl+C stops an answer) |
+| `amd-npu chat [model] [--think]` | Streaming terminal chat; a multi-line paste is one message (`/reset`, `/exit`, Ctrl+C stops an answer) |
 | `amd-npu bench-llm [--raw]` | Measure the loaded model's generation speed |
 | `amd-npu disable` | Voxtype back to its CPU model; stop the server (frees the NPU) |
 | `amd-npu remove` | `disable` + delete the service; asks before deleting models, settings, packages and memlock settings |

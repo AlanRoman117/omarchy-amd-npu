@@ -12,9 +12,9 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 | Path | Role |
 |---|---|
 | `manifest.json` | Plugin manifest (`alanroman117.amd-npu`, `bar-widget`) |
-| `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.amd-npu`: `open`, `close`, `toggle`, `refresh` |
+| `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.amd-npu`: `open`, `close`, `toggle`, `refresh`, `chat`. Chat opens a plain floating terminal (`xdg-terminal-exec --app-id=org.omarchy.terminal`), not `omarchy-launch-floating-terminal-with-presentation`, whose logo and "press any key" don't suit a chat |
 | `bin/amd-npu` | Setup, dictation and model commands (`amd-npu help`) |
-| `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin) |
+| `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin). Turns readline's bracketed paste back on (Python disables it), so a multi-line paste is one message; test with a pty sending `ESC[200~...ESC[201~` |
 | `systemd/amd-npu.service` | FastFlowLM on `127.0.0.1:6669` (a browser "bad port"), `--cors 0`, sandboxed (`PrivateUsers=yes`, `ReadOnlyPaths=` the models dir). Reads `~/.config/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`). `Wants=` the proxy |
 | `lib/proxy.py` + `systemd/amd-npu-proxy.service` | The public API on `127.0.0.1:52625`. `enable` copies `proxy.py` to `~/.local/share/amd-npu/`. Refuses foreign `Origin`/`Sec-Fetch-Site` (allowlist: `AMD_NPU_ALLOWED_ORIGINS` in `server.env`), bad `Host`, non-JSON bodies on JSON endpoints, and models that aren't downloaded; strips upstream CORS headers; streams responses. `PartOf=amd-npu.service` |
 
