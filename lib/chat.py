@@ -3,6 +3,7 @@
 
 Usage: chat.py <server url> <model> <think 0|1>
 Commands: /reset clears the conversation, /exit (or Ctrl+D) quits, Ctrl+C stops an answer.
+Pasted text, newlines included, is sent as one message when you press Enter.
 Standard library only.
 """
 
@@ -11,7 +12,11 @@ import sys
 import urllib.request
 
 try:
-    import readline  # noqa: F401  (line editing and history for input())
+    import readline  # line editing and history for input()
+
+    # Python turns bracketed paste off, which makes each line of a multi-line paste its own
+    # message. With it on, a paste stays in the input line until Enter.
+    readline.parse_and_bind("set enable-bracketed-paste on")
 except ImportError:
     pass
 
@@ -46,7 +51,7 @@ def stream(url, model, messages, think):
 
 def main():
     url, model, think = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-    print(f"{BOLD}{model}{RESET} on the AMD NPU  {DIM}(/reset, /exit, Ctrl+C stops an answer){RESET}\n")
+    print(f"{BOLD}{model}{RESET} on the AMD NPU  {DIM}(paste text to summarize, /reset, /exit, Ctrl+C stops an answer){RESET}\n")
     messages = []
     while True:
         try:
