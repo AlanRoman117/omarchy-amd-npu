@@ -1,14 +1,16 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
 
 // AMD NPU: bar icon plus a popup card in the style of Omarchy's own panels
 // (power, network, bluetooth). The card covers Voxtype dictation on the NPU
 // (Whisper) and small local LLMs: load one next to Whisper or give it the
-// NPU alone, see what's loaded, test it, unload it. Recording/transcribing
-// state stays with Omarchy's built-in Dictation indicator.
+// NPU alone, see what's loaded, test it, unload it. While you dictate, a
+// countdown shows above Voxtype's waveform (CountdownOverlay.qml). Before setup,
+// the card walks you through it, since Omarchy plugins can't install anything.
 Panel {
   id: root
   moduleName: "alanroman117.amd-npu"
@@ -16,9 +18,10 @@ Panel {
   // Own the IPC target so it can also carry refresh().
   manageIpc: false
 
-  // Bar icon state: "ready" (service active and answering), "stopped", or
-  // "absent" (not set up, widget hidden).
-  property string status: "absent"
+  // Bar icon state: "ready" (service active and answering), "stopped", a setup
+  // step from `amd-npu setup-state` ("driver", "install", "reboot", "enable"),
+  // or "unsupported" (no XDNA2 NPU: widget hidden).
+  property string status: "unsupported"
   // Card details, from `amd-npu status --json`.
   property var info: ({})
   // "", "switch", "load", "unload", "share"
@@ -38,10 +41,19 @@ Panel {
   property int recLimit: 60
   property real recStartMs: 0
   property int recRemaining: 0
-  property bool osdShown: false
-  property var osdPending: null
+  // Voxtype's [osd] settings, so the countdown can sit above its waveform.
+  property bool voxOsdEnabled: true
+  property string voxOsdPosition: "bottom-center"
+  property real voxOsdTopMargin: 0.85
+  property int voxOsdHeight: 48
+  property int voxOsdMargin: 24
   readonly property bool recording: recState === "recording"
   readonly property bool recWarn: recording && recRemaining <= 15
+  readonly property bool setupMode: ["driver", "install", "reboot", "enable"].indexOf(status) >= 0
+  // The bar makes one widget per monitor; only the one on the focused monitor
+  // (where Voxtype draws its waveform) shows the countdown.
+  readonly property var barScreen: button.QsWindow.window ? button.QsWindow.window.screen : null
+  readonly property bool onFocusedMonitor: !Hyprland.focusedMonitor || !barScreen || Hyprland.focusedMonitor.name === barScreen.name
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
 
   readonly property string cli: Qt.resolvedUrl("bin/amd-npu").toString().replace("file://", "")
@@ -49,7 +61,7 @@ Panel {
   readonly property var downloaded: info.downloaded || []
   readonly property bool exclusive: info.mode === "exclusive"
   readonly property bool onNpu: info.backend === "remote" && info.service === "active" && !exclusive
-  readonly property string probe: "systemctl --user cat amd-npu.service >/dev/null 2>&1 || { echo absent; exit; }; " +
+  readonly property string probe: "systemctl --user cat amd-npu.service >/dev/null 2>&1 || { " + quote(cli) + " setup-state; exit; }; " +
     "if systemctl --user is-active --quiet amd-npu.service && " +
     "[ \"$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:52625/api/version)\" = 200 ]; " +
     "then echo ready; else echo stopped; fi"
@@ -66,7 +78,7 @@ Panel {
 
   function refresh() {
     if (!probeProc.running) probeProc.running = true
-    if (opened && !infoProc.running) infoProc.running = true
+    if (opened && !setupMode && !infoProc.running) infoProc.running = true
   }
 
   // Refresh every copy of the widget (one per monitor), as BarWidget.broadcast does.
@@ -129,7 +141,18 @@ Panel {
     bar.run("setsid uwsm-app -- xdg-terminal-exec --app-id=org.omarchy.terminal --title=" + quote("AMD NPU chat") + " -e " + quote(cli) + " chat")
   }
 
+  // Setup runs in a terminal: it asks for sudo, and install ends with a reboot.
+  function openSetup(command) {
+    if (!bar) return
+    close()
+    bar.run("omarchy-launch-floating-terminal-with-presentation " + quote(cli) + " " + command)
+  }
+
   function statusCaption() {
+    if (status === "driver") return "DRIVER MISSING"
+    if (status === "install") return "NOT SET UP"
+    if (status === "reboot") return "RESTART NEEDED"
+    if (status === "enable") return "ONE STEP LEFT"
     if (busy === "load") return "LOADING MODEL..."
     if (busy === "unload") return "UNLOADING..."
     if (busy === "share" || busy === "switch") return "SWITCHING..."
@@ -138,6 +161,14 @@ Panel {
     if (llm && info.backend === "remote") return "READY + LLM"
     if (info.backend === "remote") return "READY"
     return "LOCAL MODEL"
+  }
+
+  function setupText() {
+    if (status === "driver") return "This machine has an AMD XDNA2 NPU, but its driver (amdxdna, in Linux 6.14 and later) isn't loaded."
+    if (status === "install") return "Run Whisper dictation and small local models on the NPU. Setup installs xrt, xrt-plugin-amdxdna and fastflowlm and raises the locked-memory limit (it asks for your password), then needs a restart."
+    if (status === "reboot") return "Installed. Restart the computer to apply the locked-memory limit, then finish setup here."
+    if (status === "enable") return "Last step: download Whisper, start the NPU server and point Voxtype at it."
+    return ""
   }
 
   function dictationSubtitle() {
@@ -159,28 +190,28 @@ Panel {
     return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2)
   }
 
-  function parseVoxtypeLimit(text) {
-    var m = /^\s*\[audio\][^\[]*?^\s*max_duration_secs\s*=\s*(\d+)/m.exec(String(text || ""))
-    recLimit = m ? parseInt(m[1]) : 60
-  }
-
-  // Omarchy's OSD (the volume/brightness overlay), driven through its IPC.
-  // One update in flight at a time; the latest pending payload wins.
-  function showOsd(payload) {
-    if (osdProc.running) {
-      osdPending = payload
-      return
+  // Reads what the card needs from Voxtype's config.toml: the recording limit
+  // ([audio] max_duration_secs) and where its waveform sits ([osd]).
+  function parseVoxtypeConfig(text) {
+    var section = "", values = {}
+    var lines = String(text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].replace(/\s+#.*$/, "").trim()
+      var header = /^\[([^\]]+)\]$/.exec(line)
+      if (header) { section = header[1].trim(); continue }
+      var pair = /^([A-Za-z0-9_]+)\s*=\s*(.+)$/.exec(line)
+      if (pair) values[section + "." + pair[1]] = pair[2].trim().replace(/^"(.*)"$/, "$1")
     }
-    osdProc.command = ["omarchy-shell", "-q", "osd", "show", JSON.stringify(payload)]
-    osdProc.running = true
-    osdShown = true
-  }
-
-  function closeOsd() {
-    osdPending = null
-    if (!osdShown) return
-    osdShown = false
-    if (!osdCloseProc.running) osdCloseProc.running = true
+    function num(key, fallback) {
+      var n = parseFloat(values[key])
+      return isNaN(n) ? fallback : n
+    }
+    recLimit = Math.round(num("audio.max_duration_secs", 60))
+    voxOsdEnabled = values["osd.enabled"] !== "false"
+    voxOsdPosition = values["osd.position"] || "bottom-center"
+    voxOsdTopMargin = num("osd.top_margin", 0.85)
+    voxOsdHeight = Math.round(num("osd.height_px", 48))
+    voxOsdMargin = Math.round(num("osd.margin_px", 24))
   }
 
   function onVoxtypeState(raw) {
@@ -193,27 +224,12 @@ Panel {
       recStartMs = Date.now()
       recRemaining = -1
       tickCountdown()
-    } else if (state === "transcribing") {
-      showOsd({ icon: "microphone", message: "Transcribing...", duration: "0" })
-    } else {
-      closeOsd()
     }
   }
 
   function tickCountdown() {
     var left = Math.max(0, recLimit - Math.floor((Date.now() - recStartMs) / 1000))
-    if (left === recRemaining) return
-    recRemaining = left
-    // The OSD draws its draining bar only when `message` is empty; the time
-    // then becomes the bar's label.
-    showOsd({
-      icon: "microphone",
-      message: "",
-      value: String(left),
-      max: String(recLimit),
-      progressText: mmss(left) + (left <= 15 ? " left - finishing soon" : " left"),
-      duration: "1500"
-    })
+    if (left !== recRemaining) recRemaining = left
   }
 
   IpcHandler {
@@ -243,7 +259,7 @@ Panel {
     if (names.indexOf(selectedModel) < 0) selectedModel = names.length > 0 ? names[0] : ""
   }
 
-  visible: status !== "absent"
+  visible: status !== "unsupported"
   implicitWidth: visible ? button.implicitWidth : 0
   implicitHeight: visible ? button.implicitHeight : 0
 
@@ -351,24 +367,24 @@ Panel {
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: root.parseVoxtypeLimit(text())
-    onLoadFailed: root.recLimit = 60
+    onLoaded: root.parseVoxtypeConfig(text())
+    onLoadFailed: root.parseVoxtypeConfig("")
   }
 
-  Process {
-    id: osdProc
-    onExited: {
-      if (root.osdPending !== null) {
-        var next = root.osdPending
-        root.osdPending = null
-        root.showOsd(next)
-      }
-    }
-  }
-
-  Process {
-    id: osdCloseProc
-    command: ["omarchy-shell", "-q", "osd", "close"]
+  CountdownOverlay {
+    targetScreen: root.barScreen
+    showing: (root.recording || root.recState === "transcribing") && root.onFocusedMonitor
+    transcribing: root.recState === "transcribing"
+    remaining: Math.max(0, root.recRemaining)
+    limit: root.recLimit
+    warn: root.recWarn
+    label: root.recState === "transcribing" ? "Transcribing..."
+      : root.mmss(Math.max(0, root.recRemaining)) + (root.recWarn ? " left - finishing soon" : " left")
+    voxEnabled: root.voxOsdEnabled
+    voxPosition: root.voxOsdPosition
+    voxTopMargin: root.voxOsdTopMargin
+    voxHeight: root.voxOsdHeight
+    voxMargin: root.voxOsdMargin
   }
 
   // Bar icon: poll at the configured interval. Card details: every 5 s while open.
@@ -395,10 +411,10 @@ Panel {
     slotSize: root.recording && !vertical ? Style.bar.iconSlot * 2.2 : Style.bar.iconSlot
     fontSize: root.recording ? Style.font.caption : Style.bar.iconFont
     active: root.recWarn
-    dimmed: root.status === "stopped" && !root.recording
+    dimmed: root.status !== "ready" && !root.recording
     tooltipText: root.opened || root.recording ? "" : (root.status === "ready"
       ? (root.llm ? "AMD NPU: dictation + " + root.llm.name : "AMD NPU: dictation ready")
-      : "AMD NPU server stopped")
+      : (root.setupMode ? "AMD NPU: not set up yet" : "AMD NPU server stopped"))
     onPressed: function(b) { root.toggle() }
   }
 
@@ -476,6 +492,7 @@ Panel {
 
           Column {
             id: heroValue
+            visible: !root.setupMode
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: 0
@@ -503,8 +520,57 @@ Panel {
 
         PanelSeparator { foreground: root.bar.foreground }
 
+        // ---------- Setup (before amd-npu.service exists) ----------
+        Column {
+          visible: root.setupMode
+          width: parent.width
+          spacing: Style.space(10)
+
+          Text {
+            textFormat: Text.PlainText
+            text: root.setupText()
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+            width: parent.width
+          }
+
+          Row {
+            id: setupRow
+            visible: root.status !== "reboot"
+            width: parent.width
+            spacing: Style.space(6)
+            readonly property real cellWidth: (width - spacing) / 2
+
+            Button {
+              width: setupRow.cellWidth
+              iconText: root.status === "driver" ? "\uf120" : "\uf019"
+              text: root.status === "install" ? "Set up" : (root.status === "enable" ? "Finish setup" : "Details")
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              bordered: true
+              onClicked: root.openSetup(root.status === "install" ? "install" : (root.status === "enable" ? "enable" : "check"))
+            }
+
+            Button {
+              width: setupRow.cellWidth
+              iconText: "\uf120"
+              text: "Check"
+              visible: root.status !== "driver"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              bordered: true
+              onClicked: root.openSetup("check")
+            }
+          }
+        }
+
         // ---------- Dictation on/off ----------
         Item {
+          visible: !root.setupMode
           width: parent.width
           implicitHeight: Math.max(toggleLabels.implicitHeight, npuSwitch.implicitHeight)
 
@@ -548,10 +614,11 @@ Panel {
           }
         }
 
-        PanelSeparator { foreground: root.bar.foreground }
+        PanelSeparator { visible: !root.setupMode; foreground: root.bar.foreground }
 
         // ---------- Local model ----------
         Column {
+          visible: !root.setupMode
           width: parent.width
           spacing: Style.space(8)
 
@@ -736,10 +803,11 @@ Panel {
           }
         }
 
-        PanelSeparator { foreground: root.bar.foreground }
+        PanelSeparator { visible: !root.setupMode; foreground: root.bar.foreground }
 
         // ---------- Details ----------
         Column {
+          visible: !root.setupMode
           width: parent.width
           spacing: Style.space(8)
 
@@ -756,6 +824,7 @@ Panel {
 
         // ---------- Actions ----------
         Column {
+          visible: !root.setupMode
           width: parent.width
           spacing: Style.space(8)
 
