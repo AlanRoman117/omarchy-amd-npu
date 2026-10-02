@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-VERSION=0.5.1
+VERSION=0.6.0
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
@@ -645,6 +645,16 @@ cmd_remove() {
   refresh_widget
 }
 
+# One word for the bar card, which can't run setup itself (Omarchy plugins have no install hooks):
+# unsupported, driver, install, reboot, enable, or installed.
+cmd_setup_state() {
+  [[ $(npu_generation) == xdna2 ]] || { echo unsupported; return; }
+  if ! compgen -G "/dev/accel/accel*" >/dev/null || [[ ! -d /sys/module/amdxdna ]]; then echo driver; return; fi
+  [[ -z $(packages_missing) ]] || { echo install; return; }
+  [[ $(ulimit -l) == unlimited ]] || { echo reboot; return; }
+  if systemctl --user cat "$UNIT" >/dev/null 2>&1; then echo installed; else echo enable; fi
+}
+
 cmd_help() {
   cat <<EOF
 amd-npu $VERSION - dictation and small local LLMs on the AMD XDNA2 NPU
@@ -654,6 +664,8 @@ Setup
   install               NPU runtime + FastFlowLM + memlock limit (sudo, then reboot)
   enable                Download Whisper, start the NPU server, point Voxtype at it
   disable / remove      Stop (Voxtype back on its CPU model) / uninstall
+  setup-state           One word for the bar card: unsupported, driver, install, reboot,
+                        enable or installed
 
 Dictation
   status [--json]       What's running on the NPU
@@ -680,6 +692,7 @@ EOF
 case ${1:-help} in
   check | install | enable | status | doctor | ping | models | pull | load | unload | chat | disable | remove | help) cmd="cmd_$1"; shift; "$cmd" "$@" ;;
   bench-llm) shift; cmd_bench_llm "$@" ;;
+  setup-state) shift; cmd_setup_state "$@" ;;
   -h | --help) cmd_help ;;
   -v | --version) echo "$VERSION" ;;
   *) cmd_help; exit 1 ;;
