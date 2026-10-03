@@ -24,7 +24,7 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 
 ## Current state (2026-10-02)
 
-- Version 0.6.0. PRs #1-#15 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.7.0. PRs #1-#16 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - **This is already the "proper" plugin.** Omarchy has no plugin store or registry: a plugin is a
   git repo with `manifest.json`, installed with `omarchy plugin add <git url>`, and sharing means
@@ -103,8 +103,9 @@ clone once installed with `omarchy plugin add`). Edits here don't reach it until
 
 ## README screenshots (`docs/screenshots/`)
 
-Card states: `card-whisper.png`, `card-share.png` and `card-exclusive.png` (qwen3.5:0.8b, retaken in
-0.5.0 in a light theme), plus `card-setup.png` (the `install` setup state, 0.6.0). To retake them:
+Card states: `card-whisper.png`, `card-share.png`, `card-exclusive.png` (qwen3.5:0.8b) and
+`card-setup.png` (the forced `install` state), all retaken in 0.7.0 in a dark theme on the 1080p HDMI
+screen. To retake them:
 
 1. Put the server in the state (`amd-npu load qwen3.5:4b [--exclusive --yes]`). After an
    exclusive switch, wait ~10 s for the desktop notification to clear before capturing.
@@ -117,7 +118,7 @@ Card states: `card-whisper.png`, `card-share.png` and `card-exclusive.png` (qwen
    the card share the colour.
 4. Check for privacy (only the card in frame, no PNG metadata) and keep the files small.
 
-The current shots are 1x (376 px wide), taken on the Z13 with `grim -s 1` (logical pixels) and cropped
+The current shots are 1x (376 px wide), taken with `grim -s 1` (logical pixels) and cropped
 just inside the card's border. Never put a countdown screenshot in the README without checking what's
 behind it: the overlay is transparent around the card, and terminal text shows through. The Z13's own screen
 (scale 2) gives sharper ones. In exclusive mode, LAST DICTATION reads "-" right after the switch,
@@ -153,6 +154,19 @@ because only NPU dictations are counted.
   below it if there's no room; for a corner position, or `[osd] enabled = false`, it takes Omarchy's
   OSD spot (`Style.space(67)` from the bottom). Only the bar instance on `Hyprland.focusedMonitor`
   shows it.
+- **Microphone (`Widget.qml`, 0.7.0):** Voxtype's `[audio] device = "default"` (also `pipewire`,
+  `pulse`) follows the system default input at record time, so the card shows
+  `Pipewire.defaultAudioSource` and the picker sets the default exactly like Omarchy's audio panel
+  (`Pipewire.preferredDefaultAudioSource` + `omarchy-audio-input-set-default <id> <name>`). Any other
+  `device` is an ALSA name that locks dictation; the card then shows it and hides the picker. Rules
+  copied from Omarchy's panel to keep Quickshell's Pipewire service stable: never read
+  `node.properties` (only `nickname`/`description`/`name`), feed the Repeater a snapshot
+  (`refreshMicInputs`, every 2 s while the card is open, skipped while recording) rather than the
+  live node list, and capture the countdown's mic name once at record start (`recMic`). Internal
+  inputs (`alsa_input.pci-*`) are labelled "Built-in mic (...)", since their nickname is the codec.
+  To test switching without clicking: run `omarchy-audio-input-set-default <id> <name>` (ids from
+  `wpctl status`), `voxtype record start`, check `pactl list source-outputs` shows Voxtype's stream
+  on that source, `cancel`, then switch back.
 - **Setup states:** when `amd-npu.service` doesn't exist, the probe asks `amd-npu setup-state`:
   `unsupported` (chip hidden), `driver`, `install`, `reboot` (`ulimit -l` isn't unlimited yet),
   `enable`, or `installed`. The card shows a short explanation, plus Set up / Finish setup / Check

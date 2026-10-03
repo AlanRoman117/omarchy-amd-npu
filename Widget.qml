@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
+import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
 
@@ -47,6 +48,24 @@ Panel {
   property real voxOsdTopMargin: 0.85
   property int voxOsdHeight: 48
   property int voxOsdMargin: 24
+  // Voxtype's [audio] device. "default" (and the pipewire/pulse ALSA plugins)
+  // follow the system default input at record time; anything else locks
+  // dictation to that ALSA device.
+  property string voxDevice: "default"
+
+  // The microphone dictation uses: the system default input, as in Omarchy's
+  // audio panel. Only nickname/description/name are read, never `properties`,
+  // which can destabilise Quickshell's Pipewire service while Voxtype's capture
+  // stream appears.
+  readonly property var micSource: Pipewire.defaultAudioSource
+  readonly property bool micLocked: ["default", "pipewire", "pulse", ""].indexOf(voxDevice) < 0
+  readonly property bool micMuted: !micLocked && !!(micSource && micSource.audio && micSource.audio.muted)
+  readonly property string micName: micLocked ? voxDevice : micLabel(micSource)
+  // Input list for the picker: a snapshot taken while the card is open, never
+  // bound to the live node list (rebuilding from it has crashed Quickshell).
+  property var micInputs: []
+  // The mic name as recording started, for the countdown.
+  property string recMic: ""
   readonly property bool recording: recState === "recording"
   readonly property bool recWarn: recording && recRemaining <= 15
   readonly property bool setupMode: ["driver", "install", "reboot", "enable"].indexOf(status) >= 0
@@ -185,6 +204,36 @@ Panel {
     return "CPU model"
   }
 
+  function micLabel(node) {
+    if (!node) return ""
+    var label = String(node.nickname || node.description || node.name || "").trim()
+      .replace(/\s+(Input|Mono)$/i, "").replace(/\bMicrophones\b/g, "Microphone")
+    // The laptop's own mic is named after its audio chip ("ALC294 Analog"),
+    // which doesn't say "built-in". Internal inputs sit on the PCI bus.
+    if (String(node.name || "").indexOf("alsa_input.pci-") === 0) return "Built-in mic (" + label + ")"
+    return label
+  }
+
+  function refreshMicInputs() {
+    if (recording || recState === "transcribing") return
+    var nodes = Pipewire.nodes ? Pipewire.nodes.values : []
+    var list = []
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i]
+      if (!n || n.isSink || n.isStream || n.name === "quickshell") continue
+      if (n.audio || String(n.type || "").indexOf("Source") >= 0) list.push(n)
+    }
+    micInputs = list
+  }
+
+  // Same as Omarchy's audio panel: Voxtype follows the default at the next recording.
+  function setMic(node) {
+    if (!node) return
+    Pipewire.preferredDefaultAudioSource = node
+    if (node.id !== undefined && node.name)
+      Quickshell.execDetached(["omarchy-audio-input-set-default", String(node.id), String(node.name)])
+  }
+
   function mmss(seconds) {
     var s = Math.max(0, Math.floor(seconds))
     return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2)
@@ -212,6 +261,7 @@ Panel {
     voxOsdTopMargin = num("osd.top_margin", 0.85)
     voxOsdHeight = Math.round(num("osd.height_px", 48))
     voxOsdMargin = Math.round(num("osd.margin_px", 24))
+    voxDevice = values["audio.device"] || "default"
   }
 
   function onVoxtypeState(raw) {
@@ -222,6 +272,7 @@ Panel {
     recState = state
     if (state === "recording") {
       recStartMs = Date.now()
+      recMic = micName + (micMuted ? " (muted)" : "")
       recRemaining = -1
       tickCountdown()
     }
@@ -371,8 +422,19 @@ Panel {
     onLoadFailed: root.parseVoxtypeConfig("")
   }
 
+  PwObjectTracker { objects: root.micSource ? [root.micSource] : [] }
+
+  Timer {
+    interval: 2000
+    running: root.opened && !root.setupMode
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refreshMicInputs()
+  }
+
   CountdownOverlay {
     targetScreen: root.barScreen
+    mic: root.recMic
     showing: (root.recording || root.recState === "transcribing") && root.onFocusedMonitor
     transcribing: root.recState === "transcribing"
     remaining: Math.max(0, root.recRemaining)
@@ -820,6 +882,45 @@ Panel {
           InfoPair { label: "Whisper"; value: (root.info.modelName || "whisper-v3:turbo") + (root.info.model === false ? " (not downloaded)" : "") }
           InfoPair { label: "NPU firmware"; value: root.info.firmware || "-" }
           InfoPair { label: "Voxtype uses"; value: root.backendText() }
+
+          Row {
+            id: micRow
+            width: parent.width
+            spacing: Style.space(8)
+
+            InfoLabel { id: micLabelText; text: "Microphone" }
+            Item { width: Math.max(0, micRow.width - micLabelText.implicitWidth - micValue.width - micRow.spacing * 2); height: 1 }
+            InfoValue {
+              id: micValue
+              width: Math.min(implicitWidth, micRow.width - micLabelText.implicitWidth - micRow.spacing * 2)
+              elide: Text.ElideRight
+              text: (root.micName || "none") + (root.micLocked ? " (Voxtype config)" : (root.micMuted ? " (muted)" : ""))
+              color: root.micMuted || !root.micName ? Color.urgent : root.bar.foreground
+            }
+          }
+
+          // Pick the input (changes the system default, like Omarchy's audio panel)
+          Column {
+            visible: !root.micLocked && root.micInputs.length > 1
+            width: parent.width
+            spacing: Style.space(6)
+
+            Repeater {
+              model: root.micInputs
+              Button {
+                required property var modelData
+                width: parent.width
+                leftAlign: true
+                text: root.micLabel(modelData)
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                active: !!root.micSource && modelData.id === root.micSource.id
+                onClicked: root.setMic(modelData)
+              }
+            }
+          }
         }
 
         // ---------- Actions ----------
