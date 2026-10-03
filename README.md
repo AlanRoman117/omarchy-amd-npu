@@ -131,7 +131,11 @@ from a key, bind `omarchy-shell alanroman117.amd-npu chat`.
 limit (`max_duration_secs`):
 - **On-screen overlay:** the microphone's name on top, then a mic icon, a bar that drains, and
   "4:37 left". The name follows the mic live: unplug a headset mid-sentence and it switches to the
-  mic PipeWire moved the recording to. In the last 15 seconds it reads "0:12 left - finishing soon".
+  mic PipeWire moved the recording to. If the mic sends no sound for 3 seconds (switched off, boom
+  muted, or a headset still reconnecting after you plug it in), the name turns red and adds
+  "- no sound", clearing as soon as sound arrives. Change the delay, or turn it off, under
+  **Warn on silence** on the card (Off / 3 s / 5 s / 10 s; kept in `~/.config/amd-npu/card.json`).
+  It's only a hint: the recording keeps going. In the last 15 seconds it reads "0:12 left - finishing soon".
 - **The chip in the bar** turns into the time, and switches to the warning colour near the end.
 - **After you let go,** the overlay says "Transcribing..." until the text arrives.
 

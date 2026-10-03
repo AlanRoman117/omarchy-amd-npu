@@ -61,6 +61,20 @@ Panel {
   readonly property bool micLocked: ["default", "pipewire", "pulse", ""].indexOf(voxDevice) < 0
   readonly property bool micMuted: !micLocked && !!(micSource && micSource.audio && micSource.audio.muted)
   readonly property string micName: micLocked ? voxDevice : micLabel(micSource)
+  // "No sound" warning: while recording, the active mic's level is watched
+  // (PwNodePeakMonitor, as in Omarchy's audio panel). If nothing louder than
+  // speech-level noise arrives for silenceWarnSec, the countdown's mic line
+  // says so; it clears as soon as sound returns. 0 turns it off. Kept in
+  // ~/.config/amd-npu/card.json, since plugins can't write their shell settings.
+  property int silenceWarnSec: 3
+  property bool peakArmed: false
+  property real lastSoundMs: 0
+  property real micSinceMs: 0
+  property bool micSilent: false
+  readonly property bool peakWatching: recording && peakArmed && !micLocked && silenceWarnSec > 0 && !!micSource
+  readonly property string cardConfigDir: configHome + "/amd-npu"
+  onMicSourceChanged: micSinceMs = Date.now()
+
   // Input list for the picker: a snapshot taken while the card is open, never
   // bound to the live node list (rebuilding from it has crashed Quickshell).
   property var micInputs: []
@@ -232,6 +246,13 @@ Panel {
       Quickshell.execDetached(["omarchy-audio-input-set-default", String(node.id), String(node.name)])
   }
 
+  function setSilenceWarn(seconds) {
+    silenceWarnSec = seconds
+    saveCardProc.command = ["sh", "-c", "mkdir -p \"$1\" && printf '%s\\n' \"$2\" > \"$1/card.json\"",
+      "sh", cardConfigDir, JSON.stringify({ silenceWarnSec: seconds })]
+    saveCardProc.running = true
+  }
+
   function mmss(seconds) {
     var s = Math.max(0, Math.floor(seconds))
     return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2)
@@ -270,6 +291,8 @@ Panel {
     recState = state
     if (state === "recording") {
       recStartMs = Date.now()
+      micSilent = false
+      peakArmTimer.restart()
       recRemaining = -1
       tickCountdown()
     }
@@ -278,6 +301,8 @@ Panel {
   function tickCountdown() {
     var left = Math.max(0, recLimit - Math.floor((Date.now() - recStartMs) / 1000))
     if (left !== recRemaining) recRemaining = left
+    var since = Math.max(recStartMs, micSinceMs, lastSoundMs)
+    micSilent = peakWatching && Date.now() - since >= silenceWarnSec * 1000
   }
 
   IpcHandler {
@@ -421,6 +446,38 @@ Panel {
 
   PwObjectTracker { objects: root.micSource ? [root.micSource] : [] }
 
+  // Starts half a second into a recording, so it doesn't open its stream on
+  // the mic at the same moment as Voxtype's.
+  Timer {
+    id: peakArmTimer
+    interval: 500
+    onTriggered: root.peakArmed = root.recording
+  }
+
+  onRecordingChanged: if (!recording) { peakArmed = false; micSilent = false }
+
+  PwNodePeakMonitor {
+    node: root.peakWatching ? root.micSource : null
+    enabled: root.peakWatching
+    // Speech is well above 0.02; a silent or still-connecting mic stays below.
+    onPeakChanged: if (peak > 0.02) root.lastSoundMs = Date.now()
+  }
+
+  FileView {
+    path: root.cardConfigDir + "/card.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try {
+        var v = JSON.parse(text()).silenceWarnSec
+        if (typeof v === "number" && v >= 0) root.silenceWarnSec = Math.round(v)
+      } catch (e) { }
+    }
+  }
+
+  Process { id: saveCardProc }
+
   Timer {
     interval: 2000
     running: root.opened && !root.setupMode
@@ -433,8 +490,8 @@ Panel {
     targetScreen: root.barScreen
     // Live: if the mic is unplugged mid-recording, PipeWire moves the stream to
     // the new default, and this follows (as Omarchy's own mic indicator does).
-    mic: root.micName ? root.micName + (root.micMuted ? " (muted)" : "") : "No microphone"
-    micAlert: root.micMuted || !root.micName
+    mic: root.micName ? root.micName + (root.micMuted ? " (muted)" : (root.micSilent ? " - no sound" : "")) : "No microphone"
+    micAlert: root.micMuted || root.micSilent || !root.micName
     showing: (root.recording || root.recState === "transcribing") && root.onFocusedMonitor
     transcribing: root.recState === "transcribing"
     remaining: Math.max(0, root.recRemaining)
@@ -918,6 +975,38 @@ Panel {
                 bordered: true
                 active: !!root.micSource && modelData.id === root.micSource.id
                 onClicked: root.setMic(modelData)
+              }
+            }
+          }
+
+          // When the countdown says a mic isn't hearing anything
+          Row {
+            id: silenceRow
+            visible: !root.micLocked
+            width: parent.width
+            spacing: Style.space(6)
+            readonly property real labelWidth: silenceLabel.implicitWidth + Style.space(4)
+            readonly property real cellWidth: (width - labelWidth - spacing * 4) / 4
+
+            InfoLabel {
+              id: silenceLabel
+              width: silenceRow.labelWidth
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Warn on silence"
+            }
+
+            Repeater {
+              model: [0, 3, 5, 10]
+              Button {
+                required property var modelData
+                width: silenceRow.cellWidth
+                text: modelData === 0 ? "Off" : modelData + " s"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                active: root.silenceWarnSec === modelData
+                onClicked: root.setSilenceWarn(modelData)
               }
             }
           }

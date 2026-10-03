@@ -102,7 +102,7 @@ Item {
         elide: Text.ElideRight
         text: root.mic
         font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Style.font.body
         color: root.micAlert ? Color.urgent : Util.alpha(Color.popups.text, 0.7)
       }
 
