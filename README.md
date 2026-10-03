@@ -115,8 +115,12 @@ power panels:
 - **Local model:** when loaded, its name, size, mode, memory (NPU buffers + process) and API address,
   with **Test LLM** (generation speed), **Chat** and **Unload**. When nothing is loaded, your downloaded models,
   a Share / NPU only choice, and **Load** (NPU only asks you to confirm first).
-- **Dictation:** Whisper model, NPU firmware, where Voxtype sends audio, **Test dictation** and
-  **Full status**.
+- **Dictation:** Whisper model, NPU firmware, where Voxtype sends audio, **which microphone** it's
+  recording from (red with "(muted)" if that input is muted), **Test dictation** and **Full status**.
+  With more than one input, pick one from the list. That sets the system default input, the same as
+  Omarchy's audio panel, and Voxtype uses it from the next dictation. The laptop's own mic is labelled
+  "Built-in mic". If Voxtype's config locks dictation to one device (`[audio] device`), the card shows
+  that device instead of the list.
 
 **Chat** opens a floating terminal with `amd-npu chat` for a quick question or a short summary:
 paste the text (newlines and all, it goes as one message) and ask. `/exit` or Ctrl+D closes the
@@ -125,8 +129,8 @@ from a key, bind `omarchy-shell alanroman117.amd-npu chat`.
 
 **While you hold F9**, a countdown shows how long you can keep talking before Voxtype's recording
 limit (`max_duration_secs`):
-- **On-screen overlay:** a mic icon, a bar that drains, and "4:37 left". In the last 15 seconds it
-  reads "0:12 left - finishing soon".
+- **On-screen overlay:** a mic icon, a bar that drains, and "4:37 left", with the microphone's name
+  underneath. In the last 15 seconds it reads "0:12 left - finishing soon".
 - **The chip in the bar** turns into the time, and switches to the warning colour near the end.
 - **After you let go,** the overlay says "Transcribing..." until the text arrives.
 

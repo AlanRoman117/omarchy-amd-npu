@@ -22,6 +22,9 @@ Item {
   property int limit: 60
   property bool warn: false
   property string label: ""
+  // The microphone being recorded, shown under the timer.
+  property string mic: ""
+  readonly property bool showMic: mic !== "" && !transcribing
 
   // Voxtype's [osd] settings (defaults as in voxtype 1.1).
   property bool voxEnabled: true
@@ -73,8 +76,12 @@ Item {
 
     BorderSurface {
       id: card
-      width: card.borderLeft + root.pad + content.implicitWidth + root.pad + card.borderRight
-      height: card.borderTop + root.pad + Style.font.displayLarge + root.pad + card.borderBottom
+      // Widens for a long mic name, up to a cap; beyond that the name elides.
+      readonly property real innerWidth: Math.max(content.implicitWidth,
+        root.showMic ? Math.min(micText.implicitWidth, Style.space(360)) : 0)
+      width: card.borderLeft + root.pad + innerWidth + root.pad + card.borderRight
+      height: card.borderTop + root.pad + Style.font.displayLarge
+        + (root.showMic ? Style.space(4) + micText.implicitHeight : 0) + root.pad + card.borderBottom
       x: Math.round((win.width - width) / 2)
       y: Math.round(root.cardY(win.height, height))
       color: Util.alpha(Color.background, 0.97)
@@ -123,6 +130,20 @@ Item {
           font: labelMetrics.font
           color: root.warn ? Color.urgent : Color.popups.text
         }
+      }
+
+      Text {
+        id: micText
+        visible: root.showMic
+        textFormat: Text.PlainText
+        x: content.x
+        y: content.y + content.height + Style.space(4)
+        width: card.innerWidth
+        elide: Text.ElideRight
+        text: root.mic
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        color: root.mic.indexOf("(muted)") >= 0 ? Color.urgent : Util.alpha(Color.popups.text, 0.7)
       }
     }
   }
