@@ -64,8 +64,6 @@ Panel {
   // Input list for the picker: a snapshot taken while the card is open, never
   // bound to the live node list (rebuilding from it has crashed Quickshell).
   property var micInputs: []
-  // The mic name as recording started, for the countdown.
-  property string recMic: ""
   readonly property bool recording: recState === "recording"
   readonly property bool recWarn: recording && recRemaining <= 15
   readonly property bool setupMode: ["driver", "install", "reboot", "enable"].indexOf(status) >= 0
@@ -272,7 +270,6 @@ Panel {
     recState = state
     if (state === "recording") {
       recStartMs = Date.now()
-      recMic = micName + (micMuted ? " (muted)" : "")
       recRemaining = -1
       tickCountdown()
     }
@@ -434,7 +431,10 @@ Panel {
 
   CountdownOverlay {
     targetScreen: root.barScreen
-    mic: root.recMic
+    // Live: if the mic is unplugged mid-recording, PipeWire moves the stream to
+    // the new default, and this follows (as Omarchy's own mic indicator does).
+    mic: root.micName ? root.micName + (root.micMuted ? " (muted)" : "") : "No microphone"
+    micAlert: root.micMuted || !root.micName
     showing: (root.recording || root.recState === "transcribing") && root.onFocusedMonitor
     transcribing: root.recState === "transcribing"
     remaining: Math.max(0, root.recRemaining)
