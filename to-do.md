@@ -44,3 +44,9 @@
 - [ ] Context length picker in the card (`--ctx`); today it's CLI-only.
 - [ ] Embeddings (`embed-gemma:300m`, `--embed 1`) for local RAG tools.
 - [ ] `status`: show NPU utilisation when FastFlowLM exposes it.
+
+## Upstream (Quickshell)
+- [ ] Report: rapid hot reloads of a plugin with an `IpcHandler` crash Quickshell 0.3.1 in
+      `IpcHandler::updateRegistration` (from `onPostReload`, ipchandler.cpp:318). Seen 2026-10-03 when
+      `omarchy plugin update` rewrote ~10 files in the plugin folder at once. Core dump symbolized
+      with Arch's debuginfod; see CLAUDE.md.
