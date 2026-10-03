@@ -140,6 +140,13 @@ because only NPU dictations are counted.
   chip icon is `\udb81\ude1a` (U+F061A, nf-md-chip); the buttons use BMP Font Awesome glyphs.
 - `Dropdown` opens its own popup; inside the card that risks clipping, so the model picker is a
   button list.
+- **Don't churn files in the installed plugin folder while the shell runs.** Every change there
+  hot-reloads the plugin. On 2026-10-03 a `git checkout -- .` plus `omarchy plugin update` (about 10
+  files, screenshots included) fired ~17 reloads in half a second, and Quickshell 0.3.1 segfaulted
+  in `qs::io::ipc::IpcHandler::updateRegistration` from `onPostReload` (ipchandler.cpp:318): a
+  use-after-free of a torn-down engine generation. The shell relaunched itself and nothing was lost,
+  but the user saw the crash. To test, copy only the files that changed, then `omarchy restart shell`.
+  Any plugin's `omarchy plugin update` can in principle hit the same upstream bug.
 - **Never `pkill -f` a pattern that appears in your own command line** (bit twice). Stop test servers
   by port: `ss -ltnpH 'sport = :PORT'`.
 - **Dictation countdown (`Widget.qml`):** follows `voxtype status --follow --format json` (run
