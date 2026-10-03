@@ -22,8 +22,10 @@ Item {
   property int limit: 60
   property bool warn: false
   property string label: ""
-  // The microphone being recorded, shown under the timer.
+  // The microphone being recorded, shown centred above the timer; red when
+  // muted or missing.
   property string mic: ""
+  property bool micAlert: false
   readonly property bool showMic: mic !== "" && !transcribing
 
   // Voxtype's [osd] settings (defaults as in voxtype 1.1).
@@ -80,18 +82,34 @@ Item {
       readonly property real innerWidth: Math.max(content.implicitWidth,
         root.showMic ? Math.min(micText.implicitWidth, Style.space(360)) : 0)
       width: card.borderLeft + root.pad + innerWidth + root.pad + card.borderRight
-      height: card.borderTop + root.pad + Style.font.displayLarge
-        + (root.showMic ? Style.space(4) + micText.implicitHeight : 0) + root.pad + card.borderBottom
+      readonly property real micSpace: root.showMic ? micText.implicitHeight + Style.space(6) : 0
+      height: card.borderTop + root.pad + micSpace + Style.font.displayLarge + root.pad + card.borderBottom
       x: Math.round((win.width - width) / 2)
       y: Math.round(root.cardY(win.height, height))
       color: Util.alpha(Color.background, 0.97)
       borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
       radius: Style.cornerRadius
 
-      Row {
-        id: content
+      // Read top to bottom: which mic, then that it's recording and the time left.
+      Text {
+        id: micText
+        visible: root.showMic
+        textFormat: Text.PlainText
         x: card.borderLeft + root.pad
         y: card.borderTop + root.pad
+        width: card.innerWidth
+        horizontalAlignment: Text.AlignHCenter
+        elide: Text.ElideRight
+        text: root.mic
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        color: root.micAlert ? Color.urgent : Util.alpha(Color.popups.text, 0.7)
+      }
+
+      Row {
+        id: content
+        x: card.borderLeft + root.pad + Math.round((card.innerWidth - implicitWidth) / 2)
+        y: card.borderTop + root.pad + card.micSpace
         height: Style.font.displayLarge
         spacing: root.transcribing ? Math.round(root.gap * 2 / 3) : root.gap
 
@@ -132,19 +150,6 @@ Item {
         }
       }
 
-      Text {
-        id: micText
-        visible: root.showMic
-        textFormat: Text.PlainText
-        x: content.x
-        y: content.y + content.height + Style.space(4)
-        width: card.innerWidth
-        elide: Text.ElideRight
-        text: root.mic
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        color: root.mic.indexOf("(muted)") >= 0 ? Color.urgent : Util.alpha(Color.popups.text, 0.7)
-      }
     }
   }
 }

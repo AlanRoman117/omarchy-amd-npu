@@ -129,8 +129,9 @@ from a key, bind `omarchy-shell alanroman117.amd-npu chat`.
 
 **While you hold F9**, a countdown shows how long you can keep talking before Voxtype's recording
 limit (`max_duration_secs`):
-- **On-screen overlay:** a mic icon, a bar that drains, and "4:37 left", with the microphone's name
-  underneath. In the last 15 seconds it reads "0:12 left - finishing soon".
+- **On-screen overlay:** the microphone's name on top, then a mic icon, a bar that drains, and
+  "4:37 left". The name follows the mic live: unplug a headset mid-sentence and it switches to the
+  mic PipeWire moved the recording to. In the last 15 seconds it reads "0:12 left - finishing soon".
 - **The chip in the bar** turns into the time, and switches to the warning colour near the end.
 - **After you let go,** the overlay says "Transcribing..." until the text arrives.
 

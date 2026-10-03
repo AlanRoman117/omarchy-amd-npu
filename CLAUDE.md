@@ -24,7 +24,7 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 
 ## Current state (2026-10-02)
 
-- Version 0.7.0. PRs #1-#16 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.7.1. PRs #1-#18 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - **This is already the "proper" plugin.** Omarchy has no plugin store or registry: a plugin is a
   git repo with `manifest.json`, installed with `omarchy plugin add <git url>`, and sharing means
@@ -169,7 +169,9 @@ because only NPU dictations are counted.
   copied from Omarchy's panel to keep Quickshell's Pipewire service stable: never read
   `node.properties` (only `nickname`/`description`/`name`), feed the Repeater a snapshot
   (`refreshMicInputs`, every 2 s while the card is open, skipped while recording) rather than the
-  live node list, and capture the countdown's mic name once at record start (`recMic`). Internal
+  live node list. The countdown's mic line binds `Pipewire.defaultAudioSource` live (as Omarchy's
+  `bar/widgets/Microphone.qml` does), so it follows an unplug mid-recording; 0.7.0 captured it once
+  at record start and went stale. Internal
   inputs (`alsa_input.pci-*`) are labelled "Built-in mic (...)", since their nickname is the codec.
   To test switching without clicking: run `omarchy-audio-input-set-default <id> <name>` (ids from
   `wpctl status`), `voxtype record start`, check `pactl list source-outputs` shows Voxtype's stream
