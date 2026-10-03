@@ -184,7 +184,11 @@ because only NPU dictations are counted.
   headset's receiver mid-recording moved the stream to a headset that sent pure zeros for a while,
   and Whisper then made up "Okay. Thank you." from the silence. To check a mic's real level without
   the shell: `timeout -s INT 2 pw-record --target <source> --rate 16000 --channels 1 --format s16
-  /tmp/x.wav`, read the max sample, delete the file.
+  /tmp/x.wav`, read the max sample, delete the file. Second test the same day: unplug then replug
+  within one recording; after the replug the moved stream stayed silent for 9+ s while new
+  recordings on the headset worked at once. It's documented in the README as a known limitation:
+  the maintainer chose not to change PipeWire/WirePlumber or Voxtype device settings to work
+  around it.
   To test switching without clicking: run `omarchy-audio-input-set-default <id> <name>` (ids from
   `wpctl status`), `voxtype record start`, check `pactl list source-outputs` shows Voxtype's stream
   on that source, `cancel`, then switch back.

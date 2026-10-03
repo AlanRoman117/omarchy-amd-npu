@@ -187,6 +187,12 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   `amd-npu disable` first.
 - **If the server is stopped, dictation fails** until it's started again, or you run `amd-npu disable`,
   which puts Voxtype back on its CPU model.
+- **Plugging a mic in mid-dictation can leave that dictation silent.** Unplugging is fine: PipeWire
+  moves the recording to the next mic and it carries on. But when a mic is plugged in (or a wireless
+  headset's receiver goes back in), PipeWire makes it the default and moves the live recording onto
+  it, and on that moved recording some devices send only silence. The countdown shows
+  "- no sound"; let go of F9 and press it again, and the new dictation uses the mic normally. This
+  plugin leaves PipeWire's device switching alone rather than change system behaviour.
 - **Don't force NPU firmware versions or install `amdxdna-dkms`** on a current kernel. A mismatch can
   make the NPU disappear.
 - **The API on `127.0.0.1:52625` has no password.** Programs on this machine, under any user, can
