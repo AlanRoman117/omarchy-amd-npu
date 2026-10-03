@@ -24,7 +24,7 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 
 ## Current state (2026-10-02)
 
-- Version 0.7.1. PRs #1-#18 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.7.2. PRs #1-#19 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - **This is already the "proper" plugin.** Omarchy has no plugin store or registry: a plugin is a
   git repo with `manifest.json`, installed with `omarchy plugin add <git url>`, and sharing means
@@ -173,6 +173,18 @@ because only NPU dictations are counted.
   `bar/widgets/Microphone.qml` does), so it follows an unplug mid-recording; 0.7.0 captured it once
   at record start and went stale. Internal
   inputs (`alsa_input.pci-*`) are labelled "Built-in mic (...)", since their nickname is the codec.
+  **No-sound warning (0.7.2):** a `PwNodePeakMonitor` on the default input, enabled only while
+  recording and armed 500 ms after it starts (so it doesn't open its stream at the same moment as
+  Voxtype's). `peak` is on a perceptual scale, not linear: the built-in mic's room noise reads ~0.34
+  while its raw samples peak at 127/32767. Anything above 0.02 counts as sound, so the warning means
+  "no signal" (a dead, muted or reconnecting mic, or a noise-gated headset in a pause), not "you
+  paused". The delay (`silenceWarnSec`: 0 = off, 3, 5, 10; default 3) lives in
+  `~/.config/amd-npu/card.json`, written with `sh -c 'mkdir -p ... && printf ...'`, because plugins
+  can't write their own `shell.json` settings. Found on 2026-10-03: replugging the wireless
+  headset's receiver mid-recording moved the stream to a headset that sent pure zeros for a while,
+  and Whisper then made up "Okay. Thank you." from the silence. To check a mic's real level without
+  the shell: `timeout -s INT 2 pw-record --target <source> --rate 16000 --channels 1 --format s16
+  /tmp/x.wav`, read the max sample, delete the file.
   To test switching without clicking: run `omarchy-audio-input-set-default <id> <name>` (ids from
   `wpctl status`), `voxtype record start`, check `pactl list source-outputs` shows Voxtype's stream
   on that source, `cancel`, then switch back.
