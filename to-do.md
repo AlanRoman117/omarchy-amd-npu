@@ -32,8 +32,15 @@
 - [ ] Ask FastFlowLM upstream for an API key / token on `flm serve` (1.0.4 has none), so other
       local processes can't use the server. The proxy now checks `Host` (DNS rebinding) and could
       also require a token once Voxtype and `amd-npu` send one.
-- [ ] Multi-user machines: another account could bind 52625 while the service is down and
-      receive dictation audio. Only matters if multi-user setups become a supported case.
+- [x] 0.8.0 (security review 2026-10-03): default-deny route allowlist in the proxy (no
+      `/api/pull`, `/load`), strict lengths and multipart, client timeout and request cap; Voxtype
+      consent + exact restore + atomic writes; per-user memlock only; no silent model downloads;
+      hardened units (systemd-analyze 5.4 → 1.8); stale-install detection; `*` origin ignored.
+- [x] Multi-user machines: the proxy forwards only to a 6669 owned by this UID, and the card
+      (PORT TAKEN) and `status` warn when another account holds 52625. Not prevented outright:
+      socket activation of the proxy would close the gap fully.
+- [ ] Clean-install test of 0.8.0's per-user memlock on a machine that never had the old global
+      drop-ins (this machine still uses the lab's 99-npu-memlock files).
 
 ## Local models: ideas
 - [ ] Dictation priority in share mode: FastFlowLM runs one request at a time, so a long LLM answer

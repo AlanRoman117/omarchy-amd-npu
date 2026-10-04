@@ -8,7 +8,7 @@ Wants=amd-npu-proxy.service
 # Defaults: Whisper only. `amd-npu load/unload` rewrites server.env and restarts the service.
 # An empty FLM_LLM expands to no argument at all, so the server starts with Whisper alone.
 Environment=FLM_LLM= FLM_ASR=1 FLM_CTX=-1
-EnvironmentFile=-%h/.config/amd-npu/server.env
+EnvironmentFile=-%E/amd-npu/server.env
 # Port 6669 is on the browsers' "bad ports" list, so web pages can't reach FastFlowLM directly.
 # Its CORS handling is incomplete in 1.0.4, so it stays off; the proxy owns CORS.
 ExecStart=/usr/bin/flm serve $FLM_LLM --asr ${FLM_ASR} --ctx-len ${FLM_CTX} --cors 0 --host 127.0.0.1 --port 6669 --quiet
@@ -16,9 +16,32 @@ LimitMEMLOCK=infinity
 Restart=on-failure
 RestartSec=5
 # The server can read models but not write them, so a request can't make it download one.
-# `amd-npu pull` downloads outside this sandbox.
+# `amd-npu pull` downloads outside this sandbox. Beyond that it sees a read-only system and home,
+# its own /tmp, and only the network families it needs; it keeps /dev/accel for the NPU.
+# (%E is $XDG_CONFIG_HOME, which FastFlowLM also uses for its models.)
 PrivateUsers=yes
-ReadOnlyPaths=%h/.config/flm/models
+ReadOnlyPaths=%E/flm/models
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+ProtectProc=invisible
 
 [Install]
 WantedBy=default.target

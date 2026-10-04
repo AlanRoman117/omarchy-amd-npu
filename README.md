@@ -54,7 +54,8 @@ Then click the dimmed chip in the bar. The card walks you through setup:
 
 1. **Set up** opens a terminal that installs the NPU runtime (it asks for your password).
 2. **Restart** the computer.
-3. **Finish setup** downloads Whisper, starts the NPU server and points Voxtype at it.
+3. **Finish setup** downloads Whisper, starts the NPU server and points Voxtype at it. It shows the
+   exact Voxtype settings it will change and asks first; `amd-npu disable` puts your own back.
 
 On a machine without an XDNA2 NPU the chip stays hidden. Prefer the terminal? The same steps are
 `amd-npu install`, a reboot, then `amd-npu enable`, run from
@@ -71,7 +72,7 @@ start yourself.
 
 To update: `omarchy plugin update alanroman117.amd-npu`, then run `amd-npu enable` again so the
 service files and the API proxy are refreshed (a changed unit's previous version is kept as one
-backup).
+backup). The card shows **Apply plugin update** when that's needed.
 
 ## Local models
 
@@ -151,8 +152,8 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 |---|---|
 | `amd-npu check` | Is this machine supported, and what's installed? |
 | `amd-npu setup-state` | One word for the bar card: `unsupported`, `driver`, `install`, `reboot`, `enable` or `installed` |
-| `amd-npu install` | Installs `xrt`, `xrt-plugin-amdxdna` and `fastflowlm`, and lifts the memlock limit for your user session (sudo; reboot after) |
-| `amd-npu enable` | Downloads Whisper (620 MB), starts `amd-npu.service`, switches Voxtype to it (config backed up). Safe to re-run; migrates the older `flm-asr.service`. |
+| `amd-npu install` | Installs `xrt`, `xrt-plugin-amdxdna` and `fastflowlm`, and lifts the memlock limit for your account only (sudo; reboot after) |
+| `amd-npu enable [--yes]` | Downloads Whisper (620 MB, asks first), starts `amd-npu.service`, and, after showing the change and asking, points Voxtype at it. Your previous Voxtype values are saved. Also applies a plugin update's new proxy and service files. Safe to re-run. |
 | `amd-npu status [--json]` | Server, Whisper, firmware, Voxtype backend, last dictation, loaded model, memory |
 | `amd-npu doctor` | `status`, browser-protection checks, and a live transcription request |
 | `amd-npu ping` | Quiet Whisper check: `ok <seconds>` or `fail <reason>` |
@@ -162,24 +163,31 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | `amd-npu unload` | Drop the model; Whisper only, dictation back on the NPU |
 | `amd-npu chat [model] [--think]` | Streaming terminal chat; a multi-line paste is one message (`/reset`, `/exit`, Ctrl+C stops an answer) |
 | `amd-npu bench-llm [--raw]` | Measure the loaded model's generation speed |
-| `amd-npu disable` | Voxtype back to its CPU model; stop the server (frees the NPU) |
-| `amd-npu remove` | `disable` + delete the service; asks before deleting models, settings, packages and memlock settings |
+| `amd-npu disable` | Puts Voxtype's own `[whisper]` settings back and stops the server (frees the NPU) |
+| `amd-npu remove` | `disable` + delete the services; asks before deleting models, settings, old backups, packages and the memlock setting |
 
 ## What it changes on your system
 
 - **Packages:** `xrt`, `xrt-plugin-amdxdna`, `fastflowlm` (all from Arch `extra`).
-- **Memlock:** the NPU runtime needs unlimited locked memory. This is scoped to your user session:
-  - `/etc/systemd/system/user@.service.d/90-amd-npu-memlock.conf`
-  - `/etc/systemd/user.conf.d/90-amd-npu-memlock.conf`
-  - `/etc/security/limits.d/90-amd-npu-memlock.conf`
-- **Services:** `~/.config/systemd/user/amd-npu.service` (FastFlowLM on `127.0.0.1:6669`, sandboxed
-  so it can't write the models folder) and `amd-npu-proxy.service` (the API on `127.0.0.1:52625`,
-  running `~/.local/share/amd-npu/proxy.py`). Settings live in `~/.config/amd-npu/server.env`
-  (which model, Whisper on or off, context length, allowed browser origins).
+- **Memlock:** the NPU runtime needs unlimited locked memory. One file, naming only your account:
+  `/etc/security/limits.d/90-amd-npu-memlock.conf`. (Versions before 0.8 also wrote two systemd
+  drop-ins that applied to every account; `amd-npu install` and `remove` delete them.)
+- **Services:** `~/.config/systemd/user/amd-npu.service` (FastFlowLM on `127.0.0.1:6669`) and
+  `amd-npu-proxy.service` (the API on `127.0.0.1:52625`, running `~/.local/share/amd-npu/proxy.py`).
+  Both are sandboxed: read-only system and home (FastFlowLM can't write its models folder), private
+  `/tmp`, no extra privileges or capabilities, and a system-call filter; `systemd-analyze --user
+  security amd-npu` rates them 1.8 ("OK"). Settings live in `~/.config/amd-npu/server.env` (which
+  model, Whisper on or off, context length, allowed browser origins) and `card.json` (the silence
+  warning).
 - **Models:** `~/.config/flm/models/`.
-- **Voxtype config:** in `~/.config/voxtype/config.toml`, `[whisper]` gets `backend = "remote"` and
-  `remote_endpoint = "http://127.0.0.1:52625"` (plus `remote_model` and a 180 s `remote_timeout_secs`). The endpoint has no `/v1`; Voxtype adds it. NPU-only
-  mode sets `backend = "local"` until you unload.
+- **Voxtype config,** only after you agree: in `~/.config/voxtype/config.toml`, `[whisper]` gets
+  `backend = "remote"`, `remote_endpoint = "http://127.0.0.1:52625"` and `remote_model`, plus
+  `remote_timeout_secs = 180` if yours is lower. The endpoint has no `/v1`; Voxtype adds it.
+  NPU-only mode sets `backend = "local"` until you unload. Your original values and the first and
+  latest copies of the file are kept in `~/.config/amd-npu/voxtype/`, and `disable`/`remove` put
+  the originals back. Edits are atomic and follow a symlinked config (dotfile managers keep working).
+- **Microphone:** the card's mic picker changes the system default input for all apps, like
+  Omarchy's audio panel; nothing changes unless you pick one.
 
 ## Good to know
 
@@ -196,18 +204,28 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 - **Don't force NPU firmware versions or install `amdxdna-dkms`** on a current kernel. A mismatch can
   make the NPU disappear.
 - **The API on `127.0.0.1:52625` has no password.** Programs on this machine, under any user, can
-  use it. That's fine on a single-user laptop. On a shared machine, another account could also take
-  the port while the service is stopped.
+  use it. That's fine on a single-user laptop. On a shared machine, another account could take the
+  port while the service is stopped, and Voxtype would then send it your audio and type whatever
+  text it returns. The card shows **PORT TAKEN** and `amd-npu status` warns when the port belongs to
+  another account, and the proxy only forwards to a FastFlowLM port that belongs to you.
 - **Web pages can't use it.** FastFlowLM itself listens on `127.0.0.1:6669`, a port browsers refuse
-  to connect to. The proxy on 52625 refuses requests from web pages (any origin not on your
-  allowlist), plain-text tricks, unexpected `Host` headers (DNS rebinding) and models that aren't
-  downloaded. It also strips FastFlowLM's "readable by any site" CORS header. `amd-npu doctor` checks
-  this. To let a browser-based chat UI in, list its origin in `~/.config/amd-npu/server.env`, e.g.
-  `AMD_NPU_ALLOWED_ORIGINS=http://localhost:8080`, then run `systemctl --user restart amd-npu`.
-- **Requests can't download models.** The server can read the models folder but not write it, so
-  downloads only happen through `amd-npu pull`. A program that calls FastFlowLM's port directly
-  with a missing model makes it hang instead (a FastFlowLM 1.0.4 bug); `systemctl --user restart
-  amd-npu` recovers.
+  to connect to. The proxy on 52625 forwards only the API routes clients need (chat, completions,
+  embeddings, transcription, model listing). It refuses requests from web pages (any origin not on
+  your allowlist), plain-text tricks, unexpected `Host` headers (DNS rebinding), malformed or
+  duplicated lengths and models that aren't downloaded. It also strips FastFlowLM's "readable by any
+  site" CORS header. `amd-npu doctor` checks this. To let a browser-based chat UI in, list its
+  origin in `~/.config/amd-npu/server.env`, e.g. `AMD_NPU_ALLOWED_ORIGINS=http://localhost:8080`,
+  then run `systemctl --user restart amd-npu` (`*` is ignored on purpose).
+- **Requests can't download models.** `/api/pull` and FastFlowLM's other management routes aren't
+  forwarded, and the server can read the models folder but not write it, so downloads only happen
+  through `amd-npu pull` (or `enable` for Whisper), after asking. A program that calls FastFlowLM's
+  port directly with a missing model makes it hang instead (a FastFlowLM 1.0.4 bug); `systemctl
+  --user restart amd-npu` recovers.
+- **Where models come from:** FastFlowLM downloads them from Hugging Face (with a ModelScope
+  mirror), following each repository's current files. There are no pinned versions or checksums, so
+  you're trusting those upstream repositories; amd-npu never downloads without asking.
+- **After `omarchy plugin update`,** the card shows **Apply plugin update** if the update changed the
+  proxy or service files; it runs `amd-npu enable`.
 
 ## Uninstall
 

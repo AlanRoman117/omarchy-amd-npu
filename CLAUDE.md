@@ -16,15 +16,15 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 | `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.amd-npu`: `open`, `close`, `toggle`, `refresh`, `chat`. Chat opens a plain floating terminal (`xdg-terminal-exec --app-id=org.omarchy.terminal`), not `omarchy-launch-floating-terminal-with-presentation`, whose logo and "press any key" don't suit a chat |
 | `bin/amd-npu` | Setup, dictation and model commands (`amd-npu help`) |
 | `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin). Turns readline's bracketed paste back on (Python disables it), so a multi-line paste is one message; test with a pty sending `ESC[200~...ESC[201~` |
-| `systemd/amd-npu.service` | FastFlowLM on `127.0.0.1:6669` (a browser "bad port"), `--cors 0`, sandboxed (`PrivateUsers=yes`, `ReadOnlyPaths=` the models dir). Reads `~/.config/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`). `Wants=` the proxy |
-| `lib/proxy.py` + `systemd/amd-npu-proxy.service` | The public API on `127.0.0.1:52625`. `enable` copies `proxy.py` to `~/.local/share/amd-npu/`. Refuses foreign `Origin`/`Sec-Fetch-Site` (allowlist: `AMD_NPU_ALLOWED_ORIGINS` in `server.env`), bad `Host`, non-JSON bodies on JSON endpoints, and models that aren't downloaded; strips upstream CORS headers; streams responses. `PartOf=amd-npu.service` |
+| `systemd/amd-npu.service` | FastFlowLM on `127.0.0.1:6669` (a browser "bad port"), `--cors 0`. Reads `%E/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`); `%E` = `$XDG_CONFIG_HOME`, which FastFlowLM also uses. Sandboxed (0.8.0): `PrivateUsers`, read-only models dir, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`, `SystemCallFilter=@system-service`, empty capability set, `RestrictAddressFamilies`, `ProtectProc=invisible` and more; both units score 1.8 in `systemd-analyze --user security`. FastFlowLM writes nothing in `$HOME` at runtime. `Wants=` the proxy |
+| `lib/proxy.py` + `systemd/amd-npu-proxy.service` | The public API on `127.0.0.1:52625`. `enable` copies `proxy.py` to `~/.local/share/amd-npu/`. Default-deny: only the exact method+path pairs in `ROUTES` are forwarded (`/api/pull`, `/load`, `/api/cancel`, `/api/npu/status` are refused); non-plain targets (`%`, trailing `/`, absolute form) get 400 (Python itself collapses a leading `//`). Refuses foreign `Origin`/`Sec-Fetch-Site` (allowlist `AMD_NPU_ALLOWED_ORIGINS`, `*` ignored), bad `Host`, non-JSON bodies on JSON endpoints, models that aren't downloaded (JSON `model` and `name`; multipart must have at most one real `model` field), duplicate/negative/CL+TE lengths. Sets Content-Length itself, 60 s per whole request, 16 concurrent requests (taken after the request arrives), and only forwards to 6669 if `/proc/net/tcp` shows it owned by this UID. `PartOf=amd-npu.service` |
 
 Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LLM + `FLM_ASR=1`),
 **exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `backend = "local"`, notifications both ways).
 
 ## Current state (2026-10-02)
 
-- Version 0.7.2. PRs #1-#19 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.8.0. PRs #1-#21 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - **This is already the "proper" plugin.** Omarchy has no plugin store or registry: a plugin is a
   git repo with `manifest.json`, installed with `omarchy plugin add <git url>`, and sharing means
@@ -192,6 +192,41 @@ because only NPU dictations are counted.
   To test switching without clicking: run `omarchy-audio-input-set-default <id> <name>` (ids from
   `wpctl status`), `voxtype record start`, check `pactl list source-outputs` shows Voxtype's stream
   on that source, `cancel`, then switch back.
+- **Security review, 2026-10-03 (0.8.0)** fixed everything it found:
+  - **Voxtype consent and restore:** `enable` prints the exact `[whisper]` changes and asks (`--yes`
+    from the card's switch, whose click is the consent). The original values go to
+    `~/.config/amd-npu/voxtype/original-whisper.json` on the first change, and `disable`/`remove`
+    restore them (removing keys that weren't there). Copies `config.toml.first`/`.latest` sit beside it.
+    `voxtype_cfg` edits the symlink target through a temp file + `os.replace`, and accepts
+    `[whisper]  # comment` headers. A user's own `remote_timeout_secs` is only raised, never lowered.
+    "On the NPU" means backend remote *and* our endpoint. Installs from before 0.8 have no recorded
+    original, so `disable` falls back to `backend = "local"`; originals are never recorded while
+    Voxtype already points at the NPU or mid NPU-only round trip (`$VOX_STATE/exclusive`), and are
+    deleted after a restore. `voxtype_cfg` reads with `tomllib`, writes strings with `json.dumps`
+    (`k:=json` keeps types), so `#`, quotes and decimal timeouts survive; `timeout_ok` never lowers
+    a timeout. NPU-only mode switches Voxtype only if it was on the NPU, and back only if the
+    marker says amd-npu switched it.
+  - **Second review (same day)** also made the proxy parse multipart with the `email` package
+    (strict MIME: closing delimiter required, every `name="model"` part counted, one Content-Type
+    only), take request slots only after a request fully arrives, and give each connection 60 s for
+    its whole request. `port_owner`/the card probe also catch `0.0.0.0`, `::`, `::1` and
+    `::ffff:127.0.0.1` listeners (`/proc/net/tcp6`).
+  - **Memlock:** only `/etc/security/limits.d/90-amd-npu-memlock.conf` (this user). PAM applies it to
+    the user manager, whose hard limit is then unlimited. That's verified here: no `user@` drop-in,
+    yet `/proc/<user systemd>/limits` shows unlimited. `enable` runs `flm validate` as
+    `systemd-run --user --wait --pipe -p LimitMEMLOCK=infinity`. The old global drop-ins are deleted by
+    `install`/`remove`. (The maintainer's machine still uses the lab's `99-npu-memlock.conf` files.)
+  - **No silent downloads:** the `flm pull` refreshes in `load`/`enable` are gone. Whisper is pulled
+    only after asking. A saved `FLM_LLM` that's no longer fully installed is dropped by `enable`
+    (an updated model with new files shows as not installed).
+  - `status --json` has `portOk` and `stale`. The card probe reports `foreign` when another UID owns
+    52625 (**PORT TAKEN**). The card shows **Apply plugin update** when `install_stale`.
+  - `status --json` used to crash when the proxy was stopped (variables were only set in that
+    branch); fixed.
+  - The CLI exports `no_proxy` for 127.0.0.1, the probe uses `curl --noproxy '*'`, and `chat.py` uses
+    `ProxyHandler({})` and strips C0/C1 control characters from model output.
+  - The card decodes the plugin path (`decodeURIComponent`) and quotes it twice for
+    `omarchy-launch-floating-terminal-with-presentation`, which re-runs `"$*"` through `bash -c`.
 - **Setup states:** when `amd-npu.service` doesn't exist, the probe asks `amd-npu setup-state`:
   `unsupported` (chip hidden), `driver`, `install`, `reboot` (`ulimit -l` isn't unlimited yet),
   `enable`, or `installed`. The card shows a short explanation, plus Set up / Finish setup / Check
