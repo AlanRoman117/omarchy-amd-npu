@@ -42,7 +42,6 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 UMask=0077
 ProtectProc=invisible
-RemoveIPC=yes
 
 [Install]
 WantedBy=default.target

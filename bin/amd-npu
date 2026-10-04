@@ -34,6 +34,8 @@ VOXTYPE_CONFIG="$CONFIG_HOME/voxtype/config.toml"
 # plus the first and the latest full copies of its config.
 VOX_STATE="$STATE_DIR/voxtype"
 VOX_ORIGINAL="$VOX_STATE/original-whisper.json"
+# Present while amd-npu has switched Voxtype to its CPU model for an NPU-only LLM.
+VOX_EXCLUSIVE="$VOX_STATE/exclusive"
 PLUGIN_ID="alanroman117.amd-npu"
 PACKAGES=(xrt xrt-plugin-amdxdna fastflowlm)
 
@@ -109,44 +111,54 @@ wait_for_server() {
   return 1
 }
 
-# Reads or edits [whisper] in Voxtype's config. Edits go to the file a symlink points at
-# (dotfile managers keep working), through a temp file and an atomic rename.
-#   voxtype_cfg get <key>          prints the value (empty if unset)
-#   voxtype_cfg set k=v ... -k ... sets keys; "-k" removes key k
+# Reads or edits [whisper] in Voxtype's config. Values are read with a TOML parser; edits keep
+# every other line as it is, go to the file a symlink points at (dotfile managers keep working),
+# and land through a temp file and an atomic rename.
+#   voxtype_cfg get <key>             the value as text (empty if unset)
+#   voxtype_cfg dump                  the keys amd-npu manages, as typed JSON
+#   voxtype_cfg set k=str k:=json -k  set a string, set a typed JSON value, remove a key
 voxtype_cfg() {
   python3 - "$VOXTYPE_CONFIG" "$@" <<'PY'
-import os, re, sys, tempfile
+import json, os, re, sys, tempfile, tomllib
 path, op, args = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3:]
-HEADER = re.compile(r'^\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$')
-KEY = re.compile(r'^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*(#.*)?$')
-lines = open(path).read().splitlines()
-if op == "get":
-    section = ""
-    for line in lines:
-        h = HEADER.match(line)
-        if h:
-            section = h.group(1)
-        elif section == "whisper":
-            m = KEY.match(line)
-            if m and m.group(1) == args[0]:
-                print(m.group(2).strip('"\''))
-                break
+MANAGED = ("backend", "remote_endpoint", "remote_model", "remote_timeout_secs")
+text = open(path).read()
+if op in ("get", "dump"):
+    try:
+        whisper = tomllib.loads(text).get("whisper", {})
+    except tomllib.TOMLDecodeError:
+        whisper = {}
+    if op == "dump":
+        print(json.dumps({k: whisper[k] for k in MANAGED if k in whisper}))
+    else:
+        v = whisper.get(args[0])
+        print("" if v is None else (str(v).lower() if isinstance(v, bool) else str(v)))
     sys.exit(0)
+HEADER = re.compile(r'^\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$')
+KEY = re.compile(r'^\s*([A-Za-z0-9_]+)\s*=')
 want, drop = {}, set()
 for a in args:
     if a.startswith("-"):
         drop.add(a[1:])
+    elif ":=" in a:
+        k, v = a.split(":=", 1)
+        want[k] = json.loads(v)
     else:
         k, v = a.split("=", 1)
         want[k] = v
-fmt = lambda k, v: f'{k} = {v}' if re.fullmatch(r'-?\d+', v) else f'{k} = "{v}"'
+def fmt(k, v):
+    if isinstance(v, bool):
+        return f"{k} = {str(v).lower()}"
+    if isinstance(v, (int, float)):
+        return f"{k} = {v}"
+    return f"{k} = {json.dumps(str(v))}"  # a JSON string is a valid TOML basic string
 out, section, seen, found = [], "", set(), False
 def flush():
     for k, v in want.items():
         if k not in seen:
             out.append(fmt(k, v))
             seen.add(k)
-for line in lines:
+for line in text.splitlines():
     h = HEADER.match(line)
     if h:
         if section == "whisper":
@@ -195,18 +207,22 @@ voxtype_backup() {
 # Records Voxtype's own [whisper] values the first time amd-npu changes them.
 voxtype_save_original() {
   [[ -f $VOX_ORIGINAL ]] && return 0
+  # Already on the NPU with nothing recorded: set up by a version before 0.8, so the user's own
+  # values are unknown. Recording these would make disable "restore" the NPU settings.
+  voxtype_on_npu && return 0
+  # Mid NPU-only round trip: the current values are amd-npu's own, not the user's.
+  [[ -f $VOX_EXCLUSIVE ]] && return 0
   mkdir -p "$VOX_STATE"
-  local k args=()
-  for k in backend remote_endpoint remote_model remote_timeout_secs; do args+=(--arg "$k" "$(voxtype_cfg get "$k")"); done
-  jq -n "${args[@]}" '{backend: $backend, remote_endpoint: $remote_endpoint, remote_model: $remote_model,
-    remote_timeout_secs: $remote_timeout_secs} | with_entries(select(.value != ""))' >"$VOX_ORIGINAL"
+  voxtype_cfg dump >"$VOX_ORIGINAL"
 }
+
+# A Voxtype remote timeout already at 180 s or more (integer or decimal) is left alone.
+timeout_ok() { [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v t="$1" 'BEGIN { exit !(t >= 180) }'; }
 
 voxtype_changes_text() {
   echo "  Voxtype's config ($VOXTYPE_CONFIG), [whisper] section:"
   echo "    backend = \"remote\", remote_endpoint = \"$URL\", remote_model = \"$WHISPER\""
-  local t; t=$(voxtype_cfg get remote_timeout_secs)
-  [[ $t =~ ^[0-9]+$ && $t -ge 180 ]] || echo "    remote_timeout_secs = 180 (long dictations take up to ~1 min to transcribe)"
+  timeout_ok "$(voxtype_cfg get remote_timeout_secs)" || echo "    remote_timeout_secs = 180 (long dictations take up to ~1 min to transcribe)"
   echo "  Your current values are saved, and 'amd-npu disable' or 'remove' puts them back."
 }
 
@@ -218,9 +234,8 @@ voxtype_use() {
     voxtype_on_npu && return 0
     voxtype_save_original
     voxtype_backup
-    local t args=(backend=remote remote_endpoint="$URL" remote_model="$WHISPER")
-    t=$(voxtype_cfg get remote_timeout_secs)
-    [[ $t =~ ^[0-9]+$ && $t -ge 180 ]] || args+=(remote_timeout_secs=180)
+    local args=(backend=remote remote_endpoint="$URL" remote_model="$WHISPER")
+    timeout_ok "$(voxtype_cfg get remote_timeout_secs)" || args+=(remote_timeout_secs:=180)
     voxtype_cfg set "${args[@]}"
   else
     [[ $(voxtype_backend) == local ]] && return 0
@@ -242,18 +257,38 @@ voxtype_restore() {
   voxtype_backup
   local k v args=()
   for k in backend remote_endpoint remote_model remote_timeout_secs; do
-    v=$(jq -r --arg k "$k" '.[$k] // empty' "$VOX_ORIGINAL")
-    if [[ -n $v ]]; then args+=("$k=$v"); else args+=("-$k"); fi
+    v=$(jq -c --arg k "$k" 'if has($k) then .[$k] else empty end' "$VOX_ORIGINAL")
+    if [[ -n $v ]]; then args+=("$k:=$v"); else args+=("-$k"); fi
   done
   voxtype_cfg set "${args[@]}"
+  # Cleared, so a later enable records whatever the user has set by then.
+  rm -f "$VOX_ORIGINAL" "$VOX_EXCLUSIVE"
   systemctl --user restart voxtype.service 2>/dev/null || true
 }
 
-# The listening socket's owner, from /proc/net/tcp: "own", "other" or "none".
+# NPU-only LLM: Voxtype moves to its CPU model only if it was on the NPU, and only then comes back.
+voxtype_exclusive_on() {
+  voxtype_on_npu || { note "Voxtype isn't using the NPU, so it's left as it is"; return 1; }
+  voxtype_use local
+  mkdir -p "$VOX_STATE" && touch "$VOX_EXCLUSIVE"
+}
+
+voxtype_exclusive_off() {
+  [[ -f $VOX_EXCLUSIVE ]] || return 1
+  voxtype_use remote
+  rm -f "$VOX_EXCLUSIVE"
+}
+
+# Who listens where our clients connect: "other" if any listener that would get 127.0.0.1:<port>
+# traffic (loopback, 0.0.0.0, ::, ::1, ::ffff:127.0.0.1) belongs to another account, else "own"
+# or "none".
 port_owner() {
-  local hex; hex=$(printf '0100007F:%04X' "$1")
-  awk -v want="$hex" -v uid="$(id -u)" '$2 == want && $4 == "0A" { print ($8 == uid ? "own" : "other"); found = 1; exit }
-    END { if (!found) print "none" }' /proc/net/tcp
+  local p; p=$(printf '%04X' "$1")
+  awk -v uid="$(id -u)" -v p="$p" '
+    BEGIN { split("0100007F 00000000 00000000000000000000000000000000 00000000000000000000000001000000 0000000000000000FFFF00000100007F", a, " ")
+            for (i in a) want[a[i] ":" p] = 1 }
+    FNR > 1 && ($2 in want) && $4 == "0A" { if ($8 == uid) own = 1; else other = 1 }
+    END { print (other ? "other" : (own ? "own" : "none")) }' /proc/net/tcp /proc/net/tcp6 2>/dev/null
 }
 
 # The installed proxy and unit files differ from this plugin version (enable applies them).
@@ -481,6 +516,8 @@ cmd_enable() {
   if [[ -f $VOXTYPE_CONFIG ]]; then
     if voxtype_on_npu; then
       ok "Already pointed at the NPU"
+    elif voxtype_exclusive_off; then
+      ok "Dictation back on the NPU"
     else
       voxtype_changes_text
       if confirm "Point Voxtype at the NPU?"; then
@@ -604,7 +641,7 @@ cmd_doctor() {
   if [[ $code == 415 ]]; then ok "A plain-text POST is refused (415)"; else bad "A plain-text POST got HTTP $code (expected 415)"; fail=1; fi
   headers=$(curl -s -m 5 -D - -o /dev/null "$URL/api/version" || true)
   if grep -qi '^access-control-allow-origin' <<<"$headers"; then bad "Responses still carry a CORS header"; fail=1; else ok "No wildcard CORS header on responses"; fi
-  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"model":"whisper-v3:turbo"}' "$URL/api/pull" || true)
+  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"model":"amd-npu-doctor-probe:none"}' "$URL/api/pull" || true)
   if [[ $code == 404 ]]; then ok "Model downloads through the API are refused (404)"; else bad "POST /api/pull got HTTP $code (expected 404)"; fail=1; fi
   local origins; origins=$(env_get AMD_NPU_ALLOWED_ORIGINS "")
   [[ " $origins " == *" * "* ]] && note "AMD_NPU_ALLOWED_ORIGINS contains '*': ignored, since it would let every website in"
@@ -667,9 +704,12 @@ cmd_load() {
     confirm "Continue?" || exit 1
     env_write "$m" 0 "$ctx"
     restart_or_rollback "$m" "$saved_env"
-    voxtype_use local
-    ok "$m has the NPU; dictation is on the CPU"
-    notify "Dictation is on the CPU" "$m is using the NPU. Unload it to bring Whisper back."
+    if voxtype_exclusive_on; then
+      ok "$m has the NPU; dictation is on the CPU"
+      notify "Dictation is on the CPU" "$m is using the NPU. Unload it to bring Whisper back."
+    else
+      ok "$m has the NPU"
+    fi
   else
     step "Load $m next to Whisper"
     env_write "$m" 1 "$ctx"
@@ -689,8 +729,7 @@ cmd_load() {
       cmd_ping >/dev/null || die "Whisper didn't come back (journalctl --user -u $UNIT)."
     fi
     ok "Whisper still answering"
-    if [[ $prev == exclusive ]]; then
-      voxtype_use remote
+    if [[ $prev == exclusive ]] && voxtype_exclusive_off; then
       notify "Dictation is back on the NPU" "$m now shares the NPU with Whisper."
     fi
   fi
@@ -720,8 +759,7 @@ cmd_unload() {
     restart_server
     ok "Whisper only on the NPU"
   fi
-  if [[ $prev == exclusive ]]; then
-    voxtype_use remote
+  if [[ $prev == exclusive ]] && voxtype_exclusive_off; then
     ok "Dictation back on the NPU"
     notify "Dictation is back on the NPU" "The local model was unloaded; Whisper has the NPU again."
   fi

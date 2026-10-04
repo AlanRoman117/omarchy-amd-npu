@@ -92,10 +92,11 @@ Panel {
   readonly property var downloaded: info.downloaded || []
   readonly property bool exclusive: info.mode === "exclusive"
   readonly property bool onNpu: info.backend === "remote" && info.service === "active" && !exclusive
-  // "foreign": another account holds port 52625 (hex CD91), which would receive the audio and
-  // choose the text Voxtype types; checked before anything talks to it.
+  // "foreign": another account listens where 127.0.0.1:52625 traffic would go (loopback, 0.0.0.0,
+  // ::, ::1 or ::ffff:127.0.0.1; port hex CD91). It would receive the audio and choose the text
+  // Voxtype types, so this is checked before anything talks to it.
   readonly property string probe: "systemctl --user cat amd-npu.service >/dev/null 2>&1 || { " + quote(cli) + " setup-state; exit; }; " +
-    "[ \"$(awk -v u=\"$(id -u)\" '$2 == \"0100007F:CD91\" && $4 == \"0A\" { print ($8 == u ? \"own\" : \"other\"); exit }' /proc/net/tcp)\" = other ] && { echo foreign; exit; }; " +
+    "awk -v u=\"$(id -u)\" 'FNR > 1 && $4 == \"0A\" && $8 != u && $2 ~ /^(0100007F|00000000|00000000000000000000000000000000|00000000000000000000000001000000|0000000000000000FFFF00000100007F):CD91$/ { f = 1 } END { exit !f }' /proc/net/tcp /proc/net/tcp6 2>/dev/null && { echo foreign; exit; }; " +
     "if systemctl --user is-active --quiet amd-npu.service && " +
     "[ \"$(curl -s --noproxy '*' -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:52625/api/version)\" = 200 ]; " +
     "then echo ready; else echo stopped; fi"

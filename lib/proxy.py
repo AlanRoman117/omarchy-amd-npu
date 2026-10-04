@@ -23,11 +23,15 @@ Content-Length itself, times out idle clients and caps concurrent requests. Requ
 never logged. Standard library only.
 """
 
+import email.errors
+import email.parser
+import email.policy
 import http.client
 import http.server
 import json
 import os
 import re
+import socket
 import socketserver
 import subprocess
 import sys
@@ -55,8 +59,10 @@ ROUTES["HEAD"] = ROUTES["GET"]
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
               "trailer", "transfer-encoding", "upgrade", "host", "content-length"}
 MAX_BODY = 512 * 1024 * 1024  # audio uploads can be large; anything bigger is refused
-CLIENT_TIMEOUT = 120          # seconds a client may stall while sending its request
+CLIENT_TIMEOUT = 120          # seconds a single read may stall
+REQUEST_DEADLINE = 60         # seconds to deliver the whole request (headers and body)
 MAX_REQUESTS = 16             # FastFlowLM answers one at a time; more than this is a flood
+SLOTS = threading.BoundedSemaphore(MAX_REQUESTS)
 
 _models_lock = threading.Lock()
 _models_cache = (0.0, set())
@@ -108,27 +114,29 @@ def upstream_owned():
         return owned
 
 
+_BAD_MULTIPART = (email.errors.NoBoundaryInMultipartDefect, email.errors.StartBoundaryNotFoundDefect,
+                  email.errors.CloseBoundaryNotFoundDefect, email.errors.MultipartInvariantViolationDefect)
+
+
 def multipart_models(body, content_type):
-    """Every value of a form field named "model". None if the body can't be parsed."""
-    match = re.search(r'boundary=(?:"([^"]+)"|([^;\s]+))', content_type)
-    if not match:
+    """Every value of a form part named "model" (file parts included), parsed with the email
+    package's strict MIME parser. None if the body isn't a complete, well-formed multipart."""
+    try:
+        msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
+            b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + body)
+    except (UnicodeError, ValueError):
         return None
-    boundary = (match.group(1) or match.group(2)).encode()
+    if not msg.is_multipart() or any(isinstance(d, _BAD_MULTIPART) for d in msg.defects):
+        return None
+    parts = list(msg.iter_parts())
+    if not parts or any(isinstance(d, _BAD_MULTIPART) for p in parts for d in p.defects):
+        return None
     models = []
-    for part in body.split(b"--" + boundary)[1:]:
-        if part.startswith(b"--"):
-            break  # closing delimiter
-        if b"\r\n\r\n" not in part:
-            continue
-        head, value = part.split(b"\r\n\r\n", 1)
-        for line in head.decode("utf-8", "replace").split("\r\n"):
-            if not line.lower().startswith("content-disposition:"):
-                continue
-            params = dict((k.strip().lower(), v.strip().strip('"'))
-                          for k, _, v in (p.partition("=") for p in line.split(";")[1:]))
-            if params.get("name") == "model" and "filename" not in params:
-                models.append(value[:-2] if value.endswith(b"\r\n") else value)
-    return [m.decode("utf-8", "replace").strip() for m in models]
+    for part in parts:
+        if part.get_param("name", header="content-disposition") == "model":
+            value = part.get_payload(decode=True) or b""
+            models.append(value.decode("utf-8", "replace").strip())
+    return models
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -138,6 +146,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
     sys_version = ""
 
     # --- helpers -------------------------------------------------------------
+
+    def setup(self):
+        super().setup()
+        # A client gets REQUEST_DEADLINE seconds for its whole request, not per read, so slow
+        # drip-feeding can't hold a thread or a request slot.
+        self._deadline = threading.Timer(REQUEST_DEADLINE, self._expire)
+        self._deadline.daemon = True
+        self._deadline.start()
+
+    def _expire(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def finish(self):
+        self._deadline.cancel()
+        super().finish()
 
     def log_message(self, fmt, *args):  # quiet: only refusals are logged (see refuse)
         pass
@@ -218,6 +244,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return None
 
     def check_body(self, path, body):
+        if len(self.headers.get_all("Content-Type") or []) > 1:
+            return 400, "more than one Content-Type header"
         content_type = self.headers.get("Content-Type", "").lower()
         if path in JSON_ENDPOINTS:
             if not content_type.startswith("application/json"):
@@ -296,9 +324,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # --- methods -------------------------------------------------------------
 
     def handle_any(self):
+        # Slots are taken only once a request has fully arrived, so idle connections can't
+        # lock clients out.
         refusal = self.check_request()
         if refusal:
             return self.refuse(*refusal)
+        if not SLOTS.acquire(blocking=False):
+            return self.refuse(503, "too many requests at once")
+        try:
+            self.handle_allowed()
+        finally:
+            SLOTS.release()
+
+    def handle_allowed(self):
         path = self.path.split("?")[0]
         body = None
         if self.command == "POST":
@@ -308,6 +346,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             refusal = self.check_body(path, body)
             if refusal:
                 return self.refuse(*refusal)
+        self._deadline.cancel()  # the request is in; streaming the answer may take minutes
         self.forward(body)
 
     def do_OPTIONS(self):
@@ -327,23 +366,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
-    slots = threading.BoundedSemaphore(MAX_REQUESTS)
-
-    def process_request(self, request, client_address):
-        if not self.slots.acquire(blocking=False):
-            try:
-                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            except OSError:
-                pass
-            self.shutdown_request(request)
-            return
-        super().process_request(request, client_address)
-
-    def process_request_thread(self, request, client_address):
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self.slots.release()
 
 
 def main():
