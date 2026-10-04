@@ -8,6 +8,7 @@ Standard library only.
 """
 
 import json
+import re
 import sys
 import urllib.request
 
@@ -24,6 +25,15 @@ DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
 # The input prompt marks its colour codes as invisible (\001...\002). Otherwise readline counts them
 # as text and wraps a long line in the wrong place, redrawing it over itself.
 PROMPT = f"\001{BOLD}\002you ›\001{RESET}\002 "
+# The server is local: never send the conversation through an HTTP proxy from the environment.
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+# Model output is printed as text only: terminal control codes (cursor moves, OSC 52 clipboard
+# writes, title changes) that pasted text might coax out of a model are dropped.
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def clean(text):
+    return CONTROL.sub("", text)
 
 
 def stream(url, model, messages, think):
@@ -38,7 +48,7 @@ def stream(url, model, messages, think):
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=600) as response:
+    with OPENER.open(request, timeout=600) as response:
         for raw in response:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
@@ -84,14 +94,14 @@ def main():
                         if not in_thinking:
                             print(DIM, end="")
                             in_thinking = True
-                        print(thought, end="", flush=True)
+                        print(clean(thought), end="", flush=True)
                     text = delta.get("content")
                     if text:
                         if in_thinking:
                             print(RESET + "\n", end="")
                             in_thinking = False
                         answer.append(text)
-                        print(text, end="", flush=True)
+                        print(clean(text), end="", flush=True)
         except KeyboardInterrupt:
             print(f"{RESET}\n{DIM}(stopped){RESET}")
         except OSError as error:

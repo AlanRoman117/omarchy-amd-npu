@@ -80,21 +80,24 @@ Panel {
   property var micInputs: []
   readonly property bool recording: recState === "recording"
   readonly property bool recWarn: recording && recRemaining <= 15
-  readonly property bool setupMode: ["driver", "install", "reboot", "enable"].indexOf(status) >= 0
+  readonly property bool setupMode: ["driver", "install", "reboot", "enable", "foreign"].indexOf(status) >= 0
   // The bar makes one widget per monitor; only the one on the focused monitor
   // (where Voxtype draws its waveform) shows the countdown.
   readonly property var barScreen: button.QsWindow.window ? button.QsWindow.window.screen : null
   readonly property bool onFocusedMonitor: !Hyprland.focusedMonitor || !barScreen || Hyprland.focusedMonitor.name === barScreen.name
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
 
-  readonly property string cli: Qt.resolvedUrl("bin/amd-npu").toString().replace("file://", "")
+  readonly property string cli: decodeURIComponent(Qt.resolvedUrl("bin/amd-npu").toString().replace("file://", ""))
   readonly property var llm: info.llm || null
   readonly property var downloaded: info.downloaded || []
   readonly property bool exclusive: info.mode === "exclusive"
   readonly property bool onNpu: info.backend === "remote" && info.service === "active" && !exclusive
+  // "foreign": another account holds port 52625 (hex CD91), which would receive the audio and
+  // choose the text Voxtype types; checked before anything talks to it.
   readonly property string probe: "systemctl --user cat amd-npu.service >/dev/null 2>&1 || { " + quote(cli) + " setup-state; exit; }; " +
+    "[ \"$(awk -v u=\"$(id -u)\" '$2 == \"0100007F:CD91\" && $4 == \"0A\" { print ($8 == u ? \"own\" : \"other\"); exit }' /proc/net/tcp)\" = other ] && { echo foreign; exit; }; " +
     "if systemctl --user is-active --quiet amd-npu.service && " +
-    "[ \"$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:52625/api/version)\" = 200 ]; " +
+    "[ \"$(curl -s --noproxy '*' -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:52625/api/version)\" = 200 ]; " +
     "then echo ready; else echo stopped; fi"
 
   // The bar API handed to third-party plugins has run() but not shellQuote(),
@@ -132,7 +135,8 @@ Panel {
 
   function toggleDictation() {
     if (exclusive && llm) runAction("share", ["load", llm.name, "--share"])
-    else runAction("switch", [onNpu ? "disable" : "enable"])
+    // Clicking the switch is the consent for enable's Voxtype change; disable puts Voxtype's own values back.
+    else runAction("switch", onNpu ? ["disable"] : ["enable", "--yes"])
   }
 
   function requestLoad() {
@@ -162,7 +166,7 @@ Panel {
   function openFullStatus() {
     if (!bar) return
     close()
-    bar.run("omarchy-launch-floating-terminal-with-presentation " + quote(cli) + " status")
+    bar.run("omarchy-launch-floating-terminal-with-presentation " + quote(quote(cli)) + " status")
   }
 
   // A plain floating terminal: the presentation wrapper's logo and "press any key" don't suit a chat.
@@ -176,10 +180,12 @@ Panel {
   function openSetup(command) {
     if (!bar) return
     close()
-    bar.run("omarchy-launch-floating-terminal-with-presentation " + quote(cli) + " " + command)
+    // The helper runs its arguments through `bash -c` again, so the path is quoted twice.
+    bar.run("omarchy-launch-floating-terminal-with-presentation " + quote(quote(cli)) + " " + command)
   }
 
   function statusCaption() {
+    if (status === "foreign") return "PORT TAKEN"
     if (status === "driver") return "DRIVER MISSING"
     if (status === "install") return "NOT SET UP"
     if (status === "reboot") return "RESTART NEEDED"
@@ -198,7 +204,8 @@ Panel {
     if (status === "driver") return "This machine has an AMD XDNA2 NPU, but its driver (amdxdna, in Linux 6.14 and later) isn't loaded."
     if (status === "install") return "Run Whisper dictation and small local models on the NPU. Setup installs xrt, xrt-plugin-amdxdna and fastflowlm and raises the locked-memory limit (it asks for your password), then needs a restart."
     if (status === "reboot") return "Installed. Restart the computer to apply the locked-memory limit, then finish setup here."
-    if (status === "enable") return "Last step: download Whisper, start the NPU server and point Voxtype at it."
+    if (status === "enable") return "Last step: download Whisper, start the NPU server and point Voxtype at it (it asks before changing Voxtype's settings)."
+    if (status === "foreign") return "Another account on this computer is using port 52625. Don't dictate until it's gone: it would receive your audio and choose the text that gets typed. Restarting the NPU server (Details) takes the port back once it's free."
     return ""
   }
 
@@ -658,26 +665,27 @@ Panel {
           Row {
             id: setupRow
             visible: root.status !== "reboot"
+            readonly property string primary: root.status === "install" ? "install" : (root.status === "enable" ? "enable" : (root.status === "foreign" ? "status" : "check"))
             width: parent.width
             spacing: Style.space(6)
             readonly property real cellWidth: (width - spacing) / 2
 
             Button {
               width: setupRow.cellWidth
-              iconText: root.status === "driver" ? "\uf120" : "\uf019"
+              iconText: root.status === "driver" || root.status === "foreign" ? "\uf120" : "\uf019"
               text: root.status === "install" ? "Set up" : (root.status === "enable" ? "Finish setup" : "Details")
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               bordered: true
-              onClicked: root.openSetup(root.status === "install" ? "install" : (root.status === "enable" ? "enable" : "check"))
+              onClicked: root.openSetup(setupRow.primary)
             }
 
             Button {
               width: setupRow.cellWidth
               iconText: "\uf120"
               text: "Check"
-              visible: root.status !== "driver"
+              visible: root.status !== "driver" && root.status !== "foreign"
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
@@ -977,6 +985,12 @@ Panel {
                 onClicked: root.setMic(modelData)
               }
             }
+
+            InfoLabel {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "Sets the system's default input for all apps, as Omarchy's audio panel does."
+            }
           }
 
           // When the countdown says a mic isn't hearing anything
@@ -1017,6 +1031,20 @@ Panel {
           visible: !root.setupMode
           width: parent.width
           spacing: Style.space(8)
+
+          // The plugin was updated but the running proxy/service files are older: enable applies them.
+          Button {
+            visible: !!root.info.stale
+            width: parent.width
+            iconText: "\uf019"
+            text: "Apply plugin update"
+            tooltipText: "Installs the updated proxy and service files (amd-npu enable)"
+            fontSize: Style.font.bodySmall
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            bordered: true
+            onClicked: root.openSetup("enable")
+          }
 
           Row {
             id: actionRow
