@@ -8,6 +8,8 @@ Put the **AMD XDNA2 NPU** in Ryzen AI laptops to work on Omarchy:
   the NPU to themselves. Use them from other apps (OpenAI and Ollama APIs) or a terminal chat.
 - **A bar card** in the style of Omarchy's own panels shows what's running and lets you switch.
 
+<p align="center"><img src="preview.png" width="900" alt="The AMD NPU card open from the bar, with dictation on the NPU, the local model picker, the microphone list and the silence warning setting; at the bottom, the dictation countdown naming the microphone, above Voxtype's waveform; in the bar, the chip showing 4:59"></p>
+
 Everything runs on [FastFlowLM](https://github.com/FastFlowLM/FastFlowLM). The CPU and iGPU stay free,
 so a big model in LM Studio on the GPU keeps its speed while the NPU works.
 
