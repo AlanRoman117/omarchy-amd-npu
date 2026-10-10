@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // The dictation countdown: a card in the style of Omarchy's OSD, placed just
@@ -86,8 +87,8 @@ Item {
       height: card.borderTop + root.pad + micSpace + Style.font.displayLarge + root.pad + card.borderBottom
       x: Math.round((win.width - width) / 2)
       y: Math.round(root.cardY(win.height, height))
-      color: Util.alpha(Color.background, 0.97)
-      borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+      color: Util.alpha(Commons.Color.background, 0.97)
+      borderSpec: Border.surfaceSpec("popups", "border", Commons.Color.popups.border, Math.max(1, Style.space(2)))
       radius: Style.cornerRadius
 
       // Read top to bottom: which mic, then that it's recording and the time left.
@@ -103,7 +104,7 @@ Item {
         text: root.mic
         font.family: Style.font.family
         font.pixelSize: Style.font.body
-        color: root.micAlert ? Color.urgent : Util.alpha(Color.popups.text, 0.7)
+        color: root.micAlert ? Commons.Color.urgent : Util.alpha(Commons.Color.popups.text, 0.7)
       }
 
       Row {
@@ -118,7 +119,7 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
           text: iconMetrics.text
           font: iconMetrics.font
-          color: Color.popups.text
+          color: Commons.Color.popups.text
         }
 
         Rectangle {
@@ -126,12 +127,12 @@ Item {
           width: root.barWidth
           height: Math.max(Style.space(6), Style.spacing.sm)
           anchors.verticalCenter: parent.verticalCenter
-          color: Util.alpha(Color.popups.text, 0.45)
+          color: Util.alpha(Commons.Color.popups.text, 0.45)
 
           Rectangle {
             height: parent.height
             width: parent.width * (root.limit > 0 ? Math.max(0, Math.min(1, root.remaining / root.limit)) : 0)
-            color: root.warn ? Color.urgent : Color.accent
+            color: root.warn ? Commons.Color.urgent : Commons.Color.accent
 
             Behavior on width {
               enabled: root.showing
@@ -146,7 +147,7 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
           text: root.label
           font: labelMetrics.font
-          color: root.warn ? Color.urgent : Color.popups.text
+          color: root.warn ? Commons.Color.urgent : Commons.Color.popups.text
         }
       }
 
