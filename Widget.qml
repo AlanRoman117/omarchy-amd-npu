@@ -4,6 +4,7 @@ import Quickshell.Io
 import Quickshell.Hyprland
 import Quickshell.Services.Pipewire
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // AMD NPU: bar icon plus a popup card in the style of Omarchy's own panels
@@ -722,7 +723,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: root.dictationSubtitle()
-              color: root.actionError !== "" ? Color.urgent : root.bar.foreground
+              color: root.actionError !== "" ? Commons.Color.urgent : root.bar.foreground
               opacity: root.actionError !== "" ? 1 : 0.6
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -893,7 +894,7 @@ Panel {
               visible: root.confirming
               textFormat: Text.PlainText
               text: "Dictation will use the CPU model (lower accuracy) until you unload " + root.selectedModel + "."
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
               width: parent.width
@@ -961,7 +962,7 @@ Panel {
               width: Math.min(implicitWidth, micRow.width - micLabelText.implicitWidth - micRow.spacing * 2)
               elide: Text.ElideRight
               text: (root.micName || "none") + (root.micLocked ? " (Voxtype config)" : (root.micMuted ? " (muted)" : ""))
-              color: root.micMuted || !root.micName ? Color.urgent : root.bar.foreground
+              color: root.micMuted || !root.micName ? Commons.Color.urgent : root.bar.foreground
             }
           }
 
@@ -1080,7 +1081,7 @@ Panel {
             visible: root.npuTest !== ""
             textFormat: Text.PlainText
             text: root.npuTest
-            color: root.npuTest.indexOf("OK") >= 0 ? root.bar.foreground : Color.urgent
+            color: root.npuTest.indexOf("OK") >= 0 ? root.bar.foreground : Commons.Color.urgent
             opacity: 0.8
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
