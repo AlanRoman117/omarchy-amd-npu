@@ -9,6 +9,7 @@ Environment=AMD_NPU_ALLOWED_ORIGINS=
 EnvironmentFile=-%E/amd-npu/server.env
 ExecStart=/usr/bin/python3 %h/.local/share/amd-npu/proxy.py
 Restart=on-failure
+TimeoutStopSec=5
 RestartSec=2
 # The proxy only needs Python, its own file, `flm list` and loopback TCP.
 NoNewPrivileges=yes

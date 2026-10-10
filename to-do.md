@@ -52,6 +52,16 @@
 - [ ] Embeddings (`embed-gemma:300m`, `--embed 1`) for local RAG tools.
 - [ ] `status`: show NPU utilisation when FastFlowLM exposes it.
 
+## Upstream (amdxdna)
+- [ ] Report the 2026-10-09 oops to the amdxdna maintainers (dri-devel / AMD's xdna-driver repo), on
+      kernel 7.2.5 with firmware 1.1.2.65. The sequence:
+      - `flm` holds the NPU, and the NPU is runtime-suspended;
+      - a second process's `DRM_IOCTL_AMDXDNA_GET_INFO` resumes it, via `aie2_hwctx_restart`;
+      - that process is being killed, so `Failed to create a rescuer kthread for wq "xdna_mailbox": -EINTR`;
+      - then a NULL dereference in `xdna_mailbox_alloc_channel.cold`.
+
+      Afterwards every open and close hangs in D state. Include the trace from that boot's journal.
+
 ## Upstream (Quickshell)
 - [ ] Report: rapid hot reloads of a plugin with an `IpcHandler` crash Quickshell 0.3.1 in
       `IpcHandler::updateRegistration` (from `onPostReload`, ipchandler.cpp:318). Seen 2026-10-03 when

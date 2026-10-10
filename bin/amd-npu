@@ -10,7 +10,7 @@ set -euo pipefail
 # Local API calls must never go through an HTTP proxy from the environment.
 export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}" NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
 
-VERSION=0.8.0
+VERSION=0.9.0
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
@@ -36,6 +36,8 @@ VOX_STATE="$STATE_DIR/voxtype"
 VOX_ORIGINAL="$VOX_STATE/original-whisper.json"
 # Present while amd-npu has switched Voxtype to its CPU model for an NPU-only LLM.
 VOX_EXCLUSIVE="$VOX_STATE/exclusive"
+# Present while the NPU is released (server stopped and disabled until `amd-npu resume`).
+RELEASED="$STATE_DIR/released"
 PLUGIN_ID="alanroman117.amd-npu"
 PACKAGES=(xrt xrt-plugin-amdxdna fastflowlm)
 
@@ -55,6 +57,7 @@ step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die() { printf '\033[31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 
 YES=0
+FORCE=0
 confirm() {
   (( YES )) && return 0
   if command -v gum >/dev/null && [[ -t 0 ]]; then
@@ -291,6 +294,74 @@ port_owner() {
     END { print (other ? "other" : (own ? "own" : "none")) }' /proc/net/tcp /proc/net/tcp6 2>/dev/null
 }
 
+# --- NPU health -------------------------------------------------------------
+# A second program on the NPU can crash the amdxdna driver (7.2 kernels): waking the suspended NPU
+# replays flm's hardware contexts in the caller, and a kill arriving mid-resume oopses in
+# xdna_mailbox_alloc_channel. Afterwards every open or close of the device hangs, processes become
+# unkillable and shutdown stalls. None of the checks below open the device.
+
+# Why the driver looks stuck, or nothing: one of this user's threads asleep uninterruptibly inside
+# the driver, or a driver crash in this boot's kernel log.
+npu_wedge_reason() {
+  local line
+  line=$(ps -L -u "$(id -u)" -o pid=,stat=,wchan:40=,comm= 2>/dev/null |
+    awk '$2 ~ /^D/ && $3 ~ /^(amdxdna|aie2|xdna|rpm_resume)/ { print $4 " (pid " $1 ") is stuck in the NPU driver (" $3 ")"; exit }')
+  [[ -n $line ]] && { echo "$line"; return; }
+  if journalctl -k -b 0 --no-pager -q -g 'xdna_mailbox|\[amdxdna\]' 2>/dev/null |
+    grep -qE 'BUG:|Oops|rescuer kthread for wq "xdna_mailbox"|RIP: .*\[amdxdna\]'; then
+    echo "the kernel reported an NPU driver crash in this boot"
+  fi
+}
+
+# Other processes of this user holding an NPU device node ("pid:comm" per line); FastFlowLM and
+# anything in amd-npu's own units don't count.
+npu_holders() {
+  local f pid
+  # Other users' /proc entries are unreadable, so find always "fails"; that's expected.
+  { find /proc/[0-9]*/fd -maxdepth 1 -lname "${NPU_NODE_GLOB:-/dev/accel/accel*}" 2>/dev/null || true; } | while read -r f; do
+    pid=${f#/proc/}; pid=${pid%%/*}
+    grep -q 'amd-npu' "/proc/$pid/cgroup" 2>/dev/null && continue
+    echo "$pid:$(cat "/proc/$pid/comm" 2>/dev/null)"
+  done | sort -u
+}
+
+# "ok", "shared <pid:comm ...>" or "wedged <reason>".
+npu_health() {
+  local r h
+  r=$(npu_wedge_reason)
+  [[ -n $r ]] && { echo "wedged $r"; return; }
+  h=$(npu_holders | tr '\n' ' ')
+  [[ -n ${h// /} ]] && { echo "shared ${h% }"; return; }
+  echo ok
+}
+
+holders_text() {
+  local item out=()
+  for item in $1; do out+=("${item#*:} (pid ${item%%:*})"); done
+  local IFS=","; echo "${out[*]}" | sed 's/,/, /g'
+}
+
+# Run before anything that starts, stops or loads on the NPU.
+npu_guard() {
+  local h; h=$(npu_health)
+  case $h in
+    wedged*)
+      die "The NPU driver is stuck: ${h#wedged }.
+  Don't start, stop or load anything on the NPU now: that would get stuck too.
+  Save your work and reboot. Shutdown may hang on the stuck process; if it sits on the
+  logo for more than a few minutes, hold the power button." ;;
+    shared*)
+      ((FORCE)) || die "Another program has the NPU open: $(holders_text "${h#shared }").
+  Two programs on the NPU can crash its driver. Close it (or start it with 'amd-npu hide-npu'),
+  release the NPU first, or run this again with --force." ;;
+  esac
+}
+
+not_released() {
+  [[ -f $RELEASED ]] && die "The NPU is released. Run 'amd-npu resume' (or turn the NPU on in the bar card) first."
+  return 0
+}
+
 # The installed proxy and unit files differ from this plugin version (enable applies them).
 install_stale() {
   [[ -f $UNIT_FILE ]] || return 1
@@ -468,6 +539,7 @@ migrate_legacy_unit() {
 cmd_enable() {
   while (($#)); do case $1 in -y | --yes) YES=1 ;; *) die "Unknown option $1" ;; esac; shift; done
   cmd_check >/dev/null || die "No supported XDNA2 NPU (run: amd-npu check)."
+  npu_guard
   [[ -z $(packages_missing) ]] || die "Packages missing (run: amd-npu install)."
 
   step "Validate the NPU stack"
@@ -510,6 +582,7 @@ cmd_enable() {
   systemctl --user daemon-reload
   systemctl --user enable "$UNIT" >/dev/null 2>&1
   restart_server
+  rm -f "$RELEASED"
   ok "Running; API on $URL ($(mode)), FastFlowLM behind it on 127.0.0.1:6669"
 
   step "Voxtype"
@@ -538,6 +611,8 @@ cmd_enable() {
 
 cmd_status_json() {
   local service=inactive server=false proxy=inactive whisper_dl=false llm="" llm_info="null" port_ok=true stale=false
+  local health released=false; health=$(npu_health)
+  [[ -f $RELEASED ]] && released=true
   systemctl --user is-active --quiet "$PROXY_UNIT" && proxy=active
   [[ $(port_owner "$PORT") == other ]] && port_ok=false
   install_stale && stale=true
@@ -556,8 +631,10 @@ cmd_status_json() {
     --argjson rss "$(server_rss_mb)" --argjson npuMb "$(server_npu_mb)" --argjson ctx "$(env_get FLM_CTX -1)" \
     --argjson models "$(models_json | jq -c '[.[] | select(.installed) | {name, params, footprint}]')" \
     --argjson portOk "$port_ok" --argjson stale "$stale" \
+    --arg health "$health" --argjson released "$released" \
     '{service: $service, proxy: $proxy, server: $server, model: $model, modelName: $modelName, url: $url,
-      portOk: $portOk, stale: $stale,
+      portOk: $portOk, stale: $stale, released: $released, npuHealth: ($health | split(" ")[0]),
+      npuDetail: ($health | sub("^[a-z]+ ?"; "")),
       firmware: $firmware, backend: $backend, last: $last, mode: $mode, rssMb: $rss, npuMb: $npuMb,
       llm: (if $llm == "" then null else ($llmInfo + {name: $llm, ctxSetting: $ctx}) end),
       downloaded: $models}'
@@ -580,6 +657,12 @@ cmd_status() {
     bad "Port $PORT is held by another account: don't dictate (it would get your audio and choose the typed text)"; ready=1
   fi
   install_stale && note "Plugin updated: run 'amd-npu enable' to apply the new proxy and service files"
+  local health; health=$(npu_health)
+  case $health in
+    wedged*) bad "The NPU driver is stuck: ${health#wedged }. Reboot (save your work first; shutdown may hang)"; ready=1 ;;
+    shared*) bad "Another program has the NPU open: $(holders_text "${health#shared }") (this can crash the driver)"; ready=1 ;;
+  esac
+  [[ -f $RELEASED ]] && note "The NPU is released (amd-npu resume brings it back)"
   if systemctl --user is-active --quiet "$UNIT"; then ok "$UNIT active"; else bad "$UNIT not running"; ready=1; fi
   if systemctl --user is-active --quiet "$PROXY_UNIT"; then ok "$PROXY_UNIT active (web pages refused)"; else bad "$PROXY_UNIT not running"; ready=1; fi
   if server_up; then ok "Server answering on $URL"; else bad "Server not answering on $URL"; ready=1; fi
@@ -689,6 +772,8 @@ cmd_load() {
     shift
   done
   [[ -n $m ]] || die "Usage: amd-npu load <model> [--exclusive] [--ctx N]"
+  not_released
+  npu_guard
   # FastFlowLM's minimum context is 512; a value it rejects would stop the server.
   [[ $ctx == -1 || ( $ctx =~ ^[0-9]{3,7}$ && $ctx -ge 512 ) ]] || die "--ctx must be -1 (the model's default) or a whole number from 512 up"
   require_downloaded_llm "$m"
@@ -752,6 +837,8 @@ restart_or_rollback() {
 }
 
 cmd_unload() {
+  not_released
+  npu_guard
   local prev; prev=$(mode)
   step "Unload the local model"
   env_write "" 1 -1
@@ -770,11 +857,12 @@ cmd_chat() {
   local m=${1:-} think=0
   [[ ${2:-} == --think || ${1:-} == --think ]] && think=1
   [[ $m == --think ]] && m=""
+  not_released
   server_up || die "The NPU server isn't running (amd-npu enable)."
   [[ -n $m ]] || m=$(loaded_llm)
   [[ -n $m ]] || die "No model loaded. Load one first (amd-npu load <model>) or name it: amd-npu chat <model>"
   require_downloaded_llm "$m"
-  [[ $m == "$(loaded_llm)" ]] || cmd_load "$m" >/dev/null
+  [[ $m == "$(loaded_llm)" ]] || { npu_guard; cmd_load "$m" >/dev/null; }
   python3 "$ROOT/lib/chat.py" "$URL" "$m" "$think"
 }
 
@@ -799,12 +887,60 @@ cmd_bench_llm() {
 }
 
 cmd_disable() {
+  npu_guard
   step "Disable the NPU server"
   voxtype_restore
   ok "Voxtype's own settings restored"
   systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
+  rm -f "$RELEASED"
   ok "$UNIT stopped; the NPU is free"
   refresh_widget
+}
+
+# Frees the NPU and its memory (Whisper and any LLM) until `resume`, across reboots. Dictation
+# moves to Voxtype's CPU model if it was on the NPU, and comes back on resume.
+cmd_release() {
+  [[ -f $UNIT_FILE ]] || die "The NPU server isn't set up (amd-npu enable)."
+  [[ -f $RELEASED ]] && { ok "The NPU is already released"; return; }
+  npu_guard
+  step "Release the NPU"
+  local held=""
+  [[ $(server_pid) != 0 ]] && held=" ($(server_npu_mb) MB of NPU buffers and $(server_rss_mb) MB of memory freed)"
+  [[ -f $VOX_EXCLUSIVE ]] || voxtype_exclusive_on || true
+  mkdir -p "$STATE_DIR" && touch "$RELEASED"
+  systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
+  local i
+  for i in $(seq 1 15); do [[ $(server_pid) == 0 ]] && break; sleep 1; done
+  [[ $(server_pid) == 0 ]] || note "FastFlowLM is taking a while to exit; check 'amd-npu status'"
+  ok "NPU released$held"
+  [[ -f $VOX_EXCLUSIVE ]] && ok "Dictation uses Voxtype's CPU model until 'amd-npu resume'"
+  local others; others=$(npu_holders | tr '
+' ' ')
+  [[ -n ${others// /} ]] && note "Still holding the NPU: $(holders_text "${others% }")"
+  notify "NPU released" "The NPU and its memory are free. Turn it back on from the bar card or with 'amd-npu resume'."
+  refresh_widget
+}
+
+cmd_resume() {
+  [[ -f $UNIT_FILE ]] || die "The NPU server isn't set up (amd-npu enable)."
+  npu_guard
+  step "Resume the NPU"
+  env_write "" 1 "$(env_get FLM_CTX -1)"
+  systemctl --user enable "$UNIT" >/dev/null 2>&1
+  restart_server
+  rm -f "$RELEASED"
+  ok "Whisper is back on the NPU"
+  voxtype_exclusive_off && ok "Dictation back on the NPU"
+  notify "NPU back on" "Dictation is on the NPU again."
+  refresh_widget
+}
+
+# Runs a program with the NPU hidden, so ROCm (which opens every AIE device it finds) uses the GPU
+# only and can't disturb the NPU server.
+cmd_hide_npu() {
+  (($#)) || die "Usage: amd-npu hide-npu <command> [args]"
+  command -v bwrap >/dev/null || die "bubblewrap isn't installed (omarchy pkg add bubblewrap)."
+  exec bwrap --dev-bind / / --tmpfs /dev/accel --tmpfs /sys/class/accel --die-with-parent -- "$@"
 }
 
 cmd_remove() {
@@ -856,6 +992,8 @@ Setup
   enable [--yes]        Download Whisper, start the NPU server, point Voxtype at it
                         (asks before changing Voxtype's config; --yes skips asking)
   disable / remove      Stop, putting Voxtype's own settings back / uninstall
+  release / resume      Free the NPU and its memory (dictation on the CPU model) / bring it back
+  hide-npu <command>    Run a program (e.g. a ROCm app) with the NPU hidden from it
   setup-state           One word for the bar card: unsupported, driver, install, reboot,
                         enable or installed
 
@@ -876,15 +1014,27 @@ Local models
                         Chat in the terminal with the loaded model
   bench-llm [--raw]     Measure the loaded model's generation speed
 
+Commands that start, stop or load on the NPU refuse while another program holds it
+(--force overrides) and while the NPU driver is stuck (reboot).
+
 API while a model is loaded: $URL/v1 (OpenAI) and $URL/api (Ollama).
 Web pages are refused unless their origin is in AMD_NPU_ALLOWED_ORIGINS ($SERVER_ENV).
 EOF
 }
 
+# --force (any position, except after hide-npu's command) lets commands run while another program
+# holds the NPU.
+if [[ ${1:-} != hide-npu ]]; then
+  args=()
+  for a in "$@"; do if [[ $a == --force ]]; then FORCE=1; else args+=("$a"); fi; done
+  set -- "${args[@]+"${args[@]}"}"
+fi
+
 case ${1:-help} in
-  check | install | enable | status | doctor | ping | models | pull | load | unload | chat | disable | remove | help) cmd="cmd_$1"; shift; "$cmd" "$@" ;;
+  check | install | enable | status | doctor | ping | models | pull | load | unload | chat | disable | remove | release | resume | help) cmd="cmd_$1"; shift; "$cmd" "$@" ;;
   bench-llm) shift; cmd_bench_llm "$@" ;;
   setup-state) shift; cmd_setup_state "$@" ;;
+  hide-npu) shift; cmd_hide_npu "$@" ;;
   -h | --help) cmd_help ;;
   -v | --version) echo "$VERSION" ;;
   *) cmd_help; exit 1 ;;

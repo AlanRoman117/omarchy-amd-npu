@@ -24,7 +24,7 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 
 ## Current state (2026-10-02)
 
-- Version 0.8.0. PRs #1-#21 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.9.0. PRs #1-#23 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - **This is already the "proper" plugin.** Omarchy has no plugin store or registry: a plugin is a
   git repo with `manifest.json`, installed with `omarchy plugin add <git url>`, and sharing means
@@ -229,6 +229,36 @@ because only NPU dictations are counted.
     `ProxyHandler({})` and strips C0/C1 control characters from model output.
   - The card decodes the plugin path (`decodeURIComponent`) and quotes it twice for
     `omarchy-launch-floating-terminal-with-presentation`, which re-runs `"$*"` through `bash -c`.
+- **Driver wedge defence (0.9.0).** On 2026-10-09 a ROCm `llama-server` from another project
+  crashed amdxdna while `flm` held the NPU:
+  - **What touches the NPU:** ROCr (`libhsa-runtime64`, including LM Studio's bundled copy) walks
+    `/sys/class/accel`, matches "aie2" and opens `/dev/accel/accel0`. No environment variable stops it.
+    The node is `crw-rw-rw-`, and `DevicePolicy` isn't enforced in user units.
+  - **The crash:** the NPU runtime-suspends when `flm` is idle; a newcomer's GET_INFO ioctl resumes it,
+    replaying `flm`'s hardware contexts in the caller (`aie2_hwctx_restart`). A kill arriving
+    mid-resume hit `Failed to create a rescuer kthread for wq "xdna_mailbox": -EINTR`, then a NULL
+    dereference in `xdna_mailbox_alloc_channel`. After that every open/close wedged, processes went
+    D-state and unkillable, and shutdown hung on `/home`.
+  - **`npu_health`** (never opens the device) reports:
+    - `wedged`: one of your own threads in D state with a wchan of `amdxdna*`, `aie2*`, `xdna*` or
+      `rpm_resume*` (`ps -L`), or `[amdxdna]` Oops / rescuer lines in `journalctl -k -b 0`;
+    - `shared`: other own processes with an fd on `/dev/accel/accel*`, found via
+      `find /proc/*/fd -lname`; pids in an `amd-npu*` cgroup don't count;
+    - `ok`.
+  - **`npu_guard`** runs in enable/disable/load/unload/chat/release/resume. Wedged always refuses;
+    shared refuses unless `--force` (parsed globally, except after `hide-npu`).
+  - **Card:** the probe reports `stuck` (D-state wchan check) and `released` (marker
+    `$STATE_DIR/released`); `status --json` adds `npuHealth`, `npuDetail` and `released`.
+  - **`release`/`resume`:** `release` disables and stops the unit and moves Voxtype to its CPU model
+    via the exclusive marker; `resume` restarts Whisper-only and moves Voxtype back. Measured: 0.7 s,
+    about 2.6 GB of RAM back with `qwen3.5:0.8b` loaded; resume takes 1.6 s, and the Voxtype config is
+    byte-identical afterwards.
+  - `TimeoutStopSec=15` on `amd-npu.service`, 5 on the proxy.
+  - `hide-npu` = `bwrap --dev-bind / / --tmpfs /dev/accel --tmpfs /sys/class/accel --die-with-parent`
+    (`/dev/dri` and `/dev/kfd` stay).
+  - **Test rule: never open `/dev/accel/accel0` from a second process to "test" any of this.** Fake the
+    inputs instead (stub `ps`/`journalctl`, `NPU_NODE_GLOB` pointed at a temp file held by a `sleep`),
+    as the 0.9.0 tests did.
 - **Setup states:** when `amd-npu.service` doesn't exist, the probe asks `amd-npu setup-state`:
   `unsupported` (chip hidden), `driver`, `install`, `reboot` (`ulimit -l` isn't unlimited yet),
   `enable`, or `installed`. The card shows a short explanation, plus Set up / Finish setup / Check
