@@ -80,7 +80,11 @@ Panel {
   property var micInputs: []
   readonly property bool recording: recState === "recording"
   readonly property bool recWarn: recording && recRemaining <= 15
-  readonly property bool setupMode: ["driver", "install", "reboot", "enable", "foreign"].indexOf(status) >= 0
+  // The NPU driver is stuck (a thread asleep in it, or a driver crash in this boot's kernel log):
+  // nothing may start or stop on the NPU until a reboot.
+  readonly property bool stuck: status === "stuck" || info.npuHealth === "wedged"
+  readonly property bool released: status === "released"
+  readonly property bool setupMode: ["driver", "install", "reboot", "enable", "foreign"].indexOf(status) >= 0 || stuck
   // The bar makes one widget per monitor; only the one on the focused monitor
   // (where Voxtype draws its waveform) shows the countdown.
   readonly property var barScreen: button.QsWindow.window ? button.QsWindow.window.screen : null
@@ -95,7 +99,10 @@ Panel {
   // "foreign": another account listens where 127.0.0.1:52625 traffic would go (loopback, 0.0.0.0,
   // ::, ::1 or ::ffff:127.0.0.1; port hex CD91). It would receive the audio and choose the text
   // Voxtype types, so this is checked before anything talks to it.
+  // "stuck": one of this user's threads is asleep inside the NPU driver. "released": `amd-npu release`.
   readonly property string probe: "systemctl --user cat amd-npu.service >/dev/null 2>&1 || { " + quote(cli) + " setup-state; exit; }; " +
+    "ps -L -u \"$(id -u)\" -o stat=,wchan:40= 2>/dev/null | awk '$1 ~ /^D/ && $2 ~ /^(amdxdna|aie2|xdna|rpm_resume)/ { f = 1 } END { exit !f }' && { echo stuck; exit; }; " +
+    "[ -f \"${XDG_CONFIG_HOME:-$HOME/.config}/amd-npu/released\" ] && { echo released; exit; }; " +
     "awk -v u=\"$(id -u)\" 'FNR > 1 && $4 == \"0A\" && $8 != u && $2 ~ /^(0100007F|00000000|00000000000000000000000000000000|00000000000000000000000001000000|0000000000000000FFFF00000100007F):CD91$/ { f = 1 } END { exit !f }' /proc/net/tcp /proc/net/tcp6 2>/dev/null && { echo foreign; exit; }; " +
     "if systemctl --user is-active --quiet amd-npu.service && " +
     "[ \"$(curl -s --noproxy '*' -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:52625/api/version)\" = 200 ]; " +
@@ -134,10 +141,28 @@ Panel {
     actionProc.running = true
   }
 
-  function toggleDictation() {
-    if (exclusive && llm) runAction("share", ["load", llm.name, "--share"])
-    // Clicking the switch is the consent for enable's Voxtype change; disable puts Voxtype's own values back.
-    else runAction("switch", onNpu ? ["disable"] : ["enable", "--yes"])
+  // The NPU switch: off releases the NPU and its memory (Whisper and any LLM; dictation moves to
+  // Voxtype's CPU model), on brings Whisper back.
+  function toggleNpu() {
+    if (stuck) return
+    runAction("switch", status === "ready" ? ["release"] : ["resume"])
+  }
+
+  function npuSubtitle() {
+    if (actionError !== "") return actionError
+    if (released) return "Off: released. The NPU and its memory are free; dictation uses the CPU model."
+    if (status !== "ready") return "Off: the NPU server isn't running."
+    var held = gb(info.npuMb) + " NPU + " + gb(info.rssMb)
+    if (exclusive && llm) return "On: " + llm.name + " has the NPU alone (" + held + "); dictation on the CPU"
+    if (llm) return "On: dictation + " + llm.name + " (" + held + ")"
+    if (!onNpu) return "On: Whisper (" + held + "); Voxtype uses its CPU model"
+    return "On: dictation (" + held + ")"
+  }
+
+  // "Also using the NPU: llama-server (pid 123)", from status --json's npuDetail ("pid:comm ...").
+  function holdersText() {
+    var items = String(info.npuDetail || "").split(" ").filter(function(x) { return x !== "" })
+    return items.map(function(x) { var i = x.indexOf(":"); return x.slice(i + 1) + " (pid " + x.slice(0, i) + ")" }).join(", ")
   }
 
   function requestLoad() {
@@ -186,6 +211,7 @@ Panel {
   }
 
   function statusCaption() {
+    if (stuck) return "NPU STUCK"
     if (status === "foreign") return "PORT TAKEN"
     if (status === "driver") return "DRIVER MISSING"
     if (status === "install") return "NOT SET UP"
@@ -194,6 +220,7 @@ Panel {
     if (busy === "load") return "LOADING MODEL..."
     if (busy === "unload") return "UNLOADING..."
     if (busy === "share" || busy === "switch") return "SWITCHING..."
+    if (released) return "RELEASED"
     if (status !== "ready") return "STOPPED"
     if (exclusive) return "LLM ONLY"
     if (llm && info.backend === "remote") return "READY + LLM"
@@ -206,17 +233,11 @@ Panel {
     if (status === "install") return "Run Whisper dictation and small local models on the NPU. Setup installs xrt, xrt-plugin-amdxdna and fastflowlm and raises the locked-memory limit (it asks for your password), then needs a restart."
     if (status === "reboot") return "Installed. Restart the computer to apply the locked-memory limit, then finish setup here."
     if (status === "enable") return "Last step: download Whisper, start the NPU server and point Voxtype at it (it asks before changing Voxtype's settings)."
+    if (stuck) return "The NPU driver is stuck" + (info.npuDetail ? " (" + info.npuDetail + ")" : "") + ". Reboot to recover, and save your work first: shutdown may hang on the stuck process. If it sits on the logo for more than a few minutes, hold the power button. Don't turn the NPU on or off until then."
     if (status === "foreign") return "Another account on this computer is using port 52625. Don't dictate until it's gone: it would receive your audio and choose the text that gets typed. Restarting the NPU server (Details) takes the port back once it's free."
     return ""
   }
 
-  function dictationSubtitle() {
-    if (actionError !== "") return actionError
-    if (exclusive) return "Off: the LLM has the NPU, dictation uses the CPU"
-    if (onNpu && llm) return "On the NPU; waits while the LLM is answering"
-    if (onNpu) return "Voxtype sends audio to the NPU"
-    return "Off: Voxtype uses its local model, NPU free"
-  }
 
   function backendText() {
     if (info.backend === "remote") return "NPU"
@@ -541,7 +562,8 @@ Panel {
     dimmed: root.status !== "ready" && !root.recording
     tooltipText: root.opened || root.recording ? "" : (root.status === "ready"
       ? (root.llm ? "AMD NPU: dictation + " + root.llm.name : "AMD NPU: dictation ready")
-      : (root.setupMode ? "AMD NPU: not set up yet" : "AMD NPU server stopped"))
+      : (root.stuck ? "AMD NPU: driver stuck, reboot needed" : (root.released ? "AMD NPU: released"
+      : (root.setupMode ? "AMD NPU: not set up yet" : "AMD NPU server stopped"))))
     onPressed: function(b) { root.toggle() }
   }
 
@@ -656,7 +678,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             text: root.setupText()
-            color: root.bar.foreground
+            color: root.stuck || root.status === "foreign" ? Color.urgent : root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
@@ -666,15 +688,15 @@ Panel {
           Row {
             id: setupRow
             visible: root.status !== "reboot"
-            readonly property string primary: root.status === "install" ? "install" : (root.status === "enable" ? "enable" : (root.status === "foreign" ? "status" : "check"))
+            readonly property string primary: root.status === "install" ? "install" : (root.status === "enable" ? "enable" : (root.status === "foreign" || root.stuck ? "status" : "check"))
             width: parent.width
             spacing: Style.space(6)
             readonly property real cellWidth: (width - spacing) / 2
 
             Button {
               width: setupRow.cellWidth
-              iconText: root.status === "driver" || root.status === "foreign" ? "\uf120" : "\uf019"
-              text: root.status === "install" ? "Set up" : (root.status === "enable" ? "Finish setup" : "Details")
+              iconText: root.status === "driver" || root.status === "foreign" || root.stuck ? "\uf120" : "\uf019"
+              text: root.status === "install" && !root.stuck ? "Set up" : (root.status === "enable" && !root.stuck ? "Finish setup" : "Details")
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
@@ -686,7 +708,7 @@ Panel {
               width: setupRow.cellWidth
               iconText: "\uf120"
               text: "Check"
-              visible: root.status !== "driver" && root.status !== "foreign"
+              visible: root.status !== "driver" && root.status !== "foreign" && !root.stuck
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
@@ -711,7 +733,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
-              text: "Dictate on the NPU"
+              text: "NPU"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.body
@@ -721,7 +743,7 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              text: root.dictationSubtitle()
+              text: root.npuSubtitle()
               color: root.actionError !== "" ? Color.urgent : root.bar.foreground
               opacity: root.actionError !== "" ? 1 : 0.6
               font.family: root.bar.fontFamily
@@ -735,11 +757,23 @@ Panel {
             id: npuSwitch
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            checked: root.onNpu
+            checked: root.status === "ready"
             busy: root.busy === "switch" || root.busy === "share"
             foreground: root.bar.foreground
-            onToggled: root.toggleDictation()
+            onToggled: root.toggleNpu()
           }
+        }
+
+        // Another program has the NPU open: the situation that can crash the driver.
+        Text {
+          visible: !root.setupMode && root.info.npuHealth === "shared"
+          textFormat: Text.PlainText
+          text: "Also using the NPU: " + root.holdersText() + ". Two programs on the NPU can crash its driver; close it, or start it with amd-npu hide-npu."
+          color: Color.urgent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+          width: parent.width
         }
 
         PanelSeparator { visible: !root.setupMode; foreground: root.bar.foreground }
@@ -767,6 +801,19 @@ Panel {
             InfoPair { label: "Mode"; value: root.exclusive ? "NPU only (dictation on CPU)" : "Shared with Whisper" }
             InfoPair { label: "Memory"; value: root.gb(root.info.npuMb) + " NPU + " + root.gb(root.info.rssMb) }
             InfoPair { label: "API"; value: "127.0.0.1:52625/v1" }
+
+            // NPU-only: bring dictation back next to the model (the switch used to do this).
+            Button {
+              visible: root.exclusive
+              width: parent.width
+              iconText: "\uf130"
+              text: root.busy === "share" ? "Switching..." : "Share the NPU with dictation"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              bordered: true
+              onClicked: root.runAction("share", ["load", root.llm.name, "--share"])
+            }
 
             Row {
               id: llmActions
@@ -822,9 +869,22 @@ Panel {
             }
           }
 
+          // Released: nothing runs on the NPU
+          Text {
+            visible: root.released
+            textFormat: Text.PlainText
+            text: "Turn the NPU on to load a model."
+            color: root.bar.foreground
+            opacity: 0.6
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            width: parent.width
+            wrapMode: Text.WordWrap
+          }
+
           // Not loaded, nothing downloaded
           Text {
-            visible: !root.llm && root.downloaded.length === 0
+            visible: !root.llm && !root.released && root.downloaded.length === 0
             textFormat: Text.PlainText
             text: "No models downloaded yet. In a terminal: amd-npu models, then amd-npu pull qwen3.5:4b"
             color: root.bar.foreground
@@ -837,7 +897,7 @@ Panel {
 
           // Not loaded: pick a downloaded model, a mode, then load
           Column {
-            visible: !root.llm && root.downloaded.length > 0
+            visible: !root.llm && !root.released && root.downloaded.length > 0
             width: parent.width
             spacing: Style.space(6)
 
@@ -1057,6 +1117,7 @@ Panel {
               width: actionRow.cellWidth
               iconText: "\uf130"
               text: root.testingNpu ? "Testing..." : "Test dictation"
+              visible: !root.released
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
@@ -1065,7 +1126,7 @@ Panel {
             }
 
             Button {
-              width: actionRow.cellWidth
+              width: root.released ? actionRow.width : actionRow.cellWidth
               iconText: "\uf120"
               text: "Full status"
               fontSize: Style.font.bodySmall

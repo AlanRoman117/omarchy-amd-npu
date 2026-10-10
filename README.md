@@ -113,8 +113,11 @@ power panels:
 
 - **Header:** READY, READY + LLM, LLM ONLY, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
   your last dictation time.
-- **Dictate on the NPU:** a switch. In NPU-only mode, switching it on moves the model to share mode
-  and brings Whisper back.
+- **NPU:** the on/off switch, showing what the NPU holds (e.g. "On: dictation + qwen3.5:0.8b (2.0 GB
+  NPU + 0.9 GB)"). Off **releases** the NPU: the server and any model stop, their memory is freed at
+  once, dictation moves to Voxtype's CPU model, and it stays off across reboots. On brings Whisper
+  back (`amd-npu release` / `resume` do the same). In NPU-only mode, **Share the NPU with dictation**
+  brings Whisper back next to the model.
 - **Local model:** when loaded, its name, size, mode, memory (NPU buffers + process) and API address,
   with **Test LLM** (generation speed), **Chat** and **Unload**. When nothing is loaded, your downloaded models,
   a Share / NPU only choice, and **Load** (NPU only asks you to confirm first).
@@ -165,6 +168,9 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | `amd-npu unload` | Drop the model; Whisper only, dictation back on the NPU |
 | `amd-npu chat [model] [--think]` | Streaming terminal chat; a multi-line paste is one message (`/reset`, `/exit`, Ctrl+C stops an answer) |
 | `amd-npu bench-llm [--raw]` | Measure the loaded model's generation speed |
+| `amd-npu release` | Frees the NPU and its memory (Whisper and any LLM); dictation uses Voxtype's CPU model; stays off across reboots |
+| `amd-npu resume` | Brings Whisper back on the NPU and dictation with it |
+| `amd-npu hide-npu <command>` | Runs a program with the NPU hidden from it, e.g. a ROCm app (see below) |
 | `amd-npu disable` | Puts Voxtype's own `[whisper]` settings back and stops the server (frees the NPU) |
 | `amd-npu remove` | `disable` + delete the services; asks before deleting models, settings, old backups, packages and the memlock setting |
 
@@ -193,10 +199,22 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 
 ## Good to know
 
-- **The NPU server holds the NPU exclusively.** Other NPU tools (`flm run`, Lemonade) need
-  `amd-npu disable` first.
-- **If the server is stopped, dictation fails** until it's started again, or you run `amd-npu disable`,
-  which puts Voxtype back on its CPU model.
+- **The NPU server holds the NPU exclusively.** Other NPU tools (`flm run`, Lemonade) need the NPU
+  released first (switch it off, or `amd-npu release`).
+- **Two programs on the NPU can crash its driver** (amdxdna in Linux 7.2). ROCm programs open the NPU
+  too, not just the GPU: LM Studio's ROCm engine, llama.cpp HIP builds, anything using ROCm's runtime.
+  If one is stopped at the wrong moment while the NPU server holds the NPU, the driver can oops. After
+  that, any program touching the NPU hangs and can't be killed, and **shutdown hangs** on it. See
+  "Running ROCm apps next to the NPU server" below. If it happens anyway:
+  - the card shows **NPU STUCK**;
+  - every amd-npu command that would start, stop or load on the NPU refuses (it would hang too);
+  - the only fix is a reboot. Save your work first. If shutdown sits on the logo for more than a few
+    minutes, hold the power button.
+
+  amd-npu also refuses to start, stop or load while another of your programs has the NPU open
+  (`--force` overrides), and the card warns about it.
+- **If the server is stopped, dictation fails** until it's started again, or you release the NPU
+  (dictation then uses Voxtype's CPU model).
 - **Plugging a mic in mid-dictation can leave that dictation silent.** Unplugging is fine: PipeWire
   moves the recording to the next mic and it carries on. But when a mic is plugged in (or a wireless
   headset's receiver goes back in), PipeWire makes it the default and moves the live recording onto
@@ -228,6 +246,27 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   you're trusting those upstream repositories; amd-npu never downloads without asking.
 - **After `omarchy plugin update`,** the card shows **Apply plugin update** if the update changed the
   proxy or service files; it runs `amd-npu enable`.
+
+## Running ROCm apps next to the NPU server
+
+ROCm's runtime opens every AMD AI Engine device it finds, so a GPU app like LM Studio or a llama.cpp
+HIP build also opens the NPU. Two ways to keep them apart:
+
+1. **Release the NPU first:** switch it off in the card (or `amd-npu release`), run your GPU work, then
+   switch it back on. Dictation keeps working on Voxtype's CPU model meanwhile.
+2. **Start the app with the NPU hidden:** `amd-npu hide-npu <command>` runs it in a bubblewrap
+   sandbox where `/dev/accel` and `/sys/class/accel` are empty, so ROCm sees only the GPU. Everything
+   else stays as it is. For example:
+
+   ```bash
+   ~/.config/omarchy/plugins/alanroman117.amd-npu/bin/amd-npu hide-npu ~/Applications/llama.cpp/build/bin/llama-server -m model.gguf
+   ```
+
+   For a desktop launcher, put the same prefix in front of the app's `Exec=` line in your own copy of
+   its `.desktop` file (`~/.local/share/applications/`). amd-npu never edits launchers. This needs
+   `bubblewrap` (`omarchy pkg add bubblewrap`). It has been tested to hide the device; whether a
+   particular app (for example an AppImage that mounts itself with FUSE) runs inside the sandbox
+   depends on the app.
 
 ## Uninstall
 
