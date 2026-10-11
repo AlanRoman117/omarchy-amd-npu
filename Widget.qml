@@ -88,6 +88,17 @@ Panel {
   // The bar makes one widget per monitor; only the one on the focused monitor
   // (where Voxtype draws its waveform) shows the countdown.
   readonly property var barScreen: button.QsWindow.window ? button.QsWindow.window.screen : null
+
+  // Voxtype's waveform overlay works out its position once, from the screen it started on, so after
+  // a monitor is plugged in or unplugged it can end up off-screen. When the screens change, its
+  // overlay process is restarted (the Voxtype daemon starts a new one within about a second), only
+  // while Voxtype is idle, and by one widget instance only.
+  readonly property string screensSig: Quickshell.screens.map(function(s) { return s.name + ":" + s.width + "x" + s.height }).join(",")
+  property string screensBaseline: ""
+  property bool osdRestartPending: false
+  readonly property bool osdOwner: !!barScreen && Quickshell.screens.length > 0 && barScreen === Quickshell.screens[0]
+  Component.onCompleted: screensBaseline = screensSig
+  onScreensSigChanged: if (screensBaseline !== "" && screensSig !== screensBaseline) osdDebounce.restart()
   readonly property bool onFocusedMonitor: !Hyprland.focusedMonitor || !barScreen || Hyprland.focusedMonitor.name === barScreen.name
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
 
@@ -312,6 +323,16 @@ Panel {
     voxDevice = values["audio.device"] || "default"
   }
 
+  function restartWaveform(anyInstance) {
+    if (!anyInstance && !osdOwner) return
+    if (recState !== "idle") {
+      osdRestartPending = true
+      return
+    }
+    osdRestartPending = false
+    if (!osdRestartProc.running) osdRestartProc.running = true
+  }
+
   function onVoxtypeState(raw) {
     var data
     try { data = JSON.parse(String(raw)) } catch (e) { return }
@@ -324,6 +345,8 @@ Panel {
       peakArmTimer.restart()
       recRemaining = -1
       tickCountdown()
+    } else if (state === "idle" && osdRestartPending) {
+      restartWaveform(true)
     }
   }
 
@@ -344,6 +367,7 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): void { root.refreshAll() }
     function chat(): void { root.openChat() }
+    function fixWaveform(): void { root.restartWaveform(true) }
   }
 
   onOpenedChanged: {
@@ -471,6 +495,21 @@ Panel {
     onFileChanged: reload()
     onLoaded: root.parseVoxtypeConfig(text())
     onLoadFailed: root.parseVoxtypeConfig("")
+  }
+
+  Timer {
+    id: osdDebounce
+    interval: 3000
+    onTriggered: {
+      root.screensBaseline = root.screensSig
+      root.restartWaveform(false)
+    }
+  }
+
+  // The overlay's process name is truncated to 15 characters by the kernel ("voxtype-osd-gtk4").
+  Process {
+    id: osdRestartProc
+    command: ["sh", "-c", "pkill -TERM -u \"$(id -u)\" -x voxtype-osd-gtk"]
   }
 
   PwObjectTracker { objects: root.micSource ? [root.micSource] : [] }

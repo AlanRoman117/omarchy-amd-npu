@@ -149,6 +149,11 @@ The countdown places itself just above Voxtype's waveform, wherever Voxtype's `[
 it (below it if the waveform is near the top, Omarchy's usual overlay spot if it's in a corner), so
 nothing needs moving. With more than one monitor it shows on the focused one, like the waveform.
 
+Voxtype works out where to draw its waveform once, from the screen it started on, so after you plug
+in or unplug a monitor it can end up off-screen. The card notices screen changes and restarts
+Voxtype's waveform overlay (only while you're not dictating; Voxtype brings it back within a
+second or two). To do it by hand: `omarchy-shell alanroman117.amd-npu fixWaveform`.
+
 Recording and transcribing states are also shown by Omarchy's built-in dictation indicator.
 
 ## Commands

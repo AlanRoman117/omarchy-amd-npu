@@ -24,7 +24,7 @@ Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LL
 
 ## Current state (2026-10-02)
 
-- Version 0.9.0. PRs #1-#23 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.9.1. PRs #1-#25 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - **This is already the "proper" plugin.** Omarchy has no plugin store or registry: a plugin is a
   git repo with `manifest.json`, installed with `omarchy plugin add <git url>`, and sharing means
@@ -259,6 +259,16 @@ because only NPU dictations are counted.
   - **Test rule: never open `/dev/accel/accel0` from a second process to "test" any of this.** Fake the
     inputs instead (stub `ps`/`journalctl`, `NPU_NODE_GLOB` pointed at a temp file held by a `sleep`),
     as the 0.9.0 tests did.
+- **Waveform after monitor changes (0.9.1).** `voxtype-osd-gtk4` positions itself once, from the
+  screen it started on. On 2026-10-11 it started with HDMI connected; after unplugging, the laptop
+  screen (1280x800 logical at 320,1080) got the waveform at y 2024, off-screen. `Widget.qml` keeps a
+  `screensSig` (each screen's name and size). A change, after a 3 s debounce and only on the widget
+  on `Quickshell.screens[0]`, runs `pkill -TERM -u $(id -u) -x voxtype-osd-gtk` (the kernel
+  truncates the name to 15 characters, so `-x voxtype-osd-gtk4` matches nothing; never use `-f`
+  here). While recording or transcribing, the restart waits for idle (`osdRestartPending`). The
+  daemon restarts its child after 1 s, doubling the delay for children that ran only briefly (1, 2,
+  4, 8, 16 s seen when tested five times in two minutes), so test restarts sparingly. IPC:
+  `fixWaveform`. The baseline is taken at load, so a shell restart doesn't trigger it.
 - **Setup states:** when `amd-npu.service` doesn't exist, the probe asks `amd-npu setup-state`:
   `unsupported` (chip hidden), `driver`, `install`, `reboot` (`ulimit -l` isn't unlimited yet),
   `enable`, or `installed`. The card shows a short explanation, plus Set up / Finish setup / Check
