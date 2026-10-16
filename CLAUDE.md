@@ -20,7 +20,7 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 | `lib/proxy.py` + `systemd/amd-npu-proxy.service` | The public API on `127.0.0.1:52625`. `enable` copies `proxy.py` to `~/.local/share/amd-npu/`. Default-deny: only the exact method+path pairs in `ROUTES` are forwarded (`/api/pull`, `/load`, `/api/cancel`, `/api/npu/status` are refused); non-plain targets (`%`, trailing `/`, absolute form) get 400 (Python itself collapses a leading `//`). Refuses foreign `Origin`/`Sec-Fetch-Site` (allowlist `AMD_NPU_ALLOWED_ORIGINS`, `*` ignored), bad `Host`, non-JSON bodies on JSON endpoints, models that aren't downloaded (JSON `model` and `name`; multipart must have at most one real `model` field), duplicate/negative/CL+TE lengths. Sets Content-Length itself, 60 s per whole request, 16 concurrent requests (taken after the request arrives), and only forwards to 6669 if `/proc/net/tcp` shows it owned by this UID. `PartOf=amd-npu.service` |
 
 Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LLM + `FLM_ASR=1`),
-**exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `backend = "local"`, notifications both ways).
+**exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `mode = "local"`, notifications both ways).
 `FLM_EMBED=1` (`amd-npu embed on`, 0.10.0) adds the embedding model in any mode; `env_write` keeps it
 unless told otherwise, so `unload`, `resume` and `enable` don't drop it.
 
@@ -271,6 +271,18 @@ because only NPU dictations are counted.
   daemon restarts its child after 1 s, doubling the delay for children that ran only briefly (1, 2,
   4, 8, 16 s seen when tested five times in two minutes), so test restarts sparingly. IPC:
   `fixWaveform`. The baseline is taken at load, so a shell restart doesn't trigger it.
+- **Voxtype 1.1 `mode` vs `backend` (0.10.1, 2026-10-16, voxtype-bin 1.1.1).** `[whisper] backend` is
+  deprecated in favour of `mode` (the daemon logs a warning on start and on every transcription).
+  Tested with temp configs and `voxtype -c <tmp> transcribe`:
+  - `mode` wins when both are set: `mode = "local"` plus `backend = "remote"` transcribes locally;
+  - `mode` alone produces no warning.
+
+  So `voxtype_backend` reads `mode`, then `backend`. `voxtype_use` writes `mode` and removes
+  `backend`. Both are managed keys, so originals restore exactly (a restored `backend` line lands at
+  the end of the section). `enable` renames `backend` to `mode` when the config is already on the
+  NPU. A pacman upgrade doesn't restart the running daemon: check
+  `systemctl --user show voxtype -p ActiveEnterTimestamp` against the upgrade time before trusting
+  "it still works".
 - **Setup states:** when `amd-npu.service` doesn't exist, the probe asks `amd-npu setup-state`:
   `unsupported` (chip hidden), `driver`, `install`, `reboot` (`ulimit -l` isn't unlimited yet),
   `enable`, or `installed`. The card shows a short explanation, plus Set up / Finish setup / Check

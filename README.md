@@ -202,9 +202,11 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   warning).
 - **Models:** `~/.config/flm/models/`.
 - **Voxtype config,** only after you agree: in `~/.config/voxtype/config.toml`, `[whisper]` gets
-  `backend = "remote"`, `remote_endpoint = "http://127.0.0.1:52625"` and `remote_model`, plus
+  `mode = "remote"`, `remote_endpoint = "http://127.0.0.1:52625"` and `remote_model`, plus
   `remote_timeout_secs = 180` if yours is lower. The endpoint has no `/v1`; Voxtype adds it.
-  NPU-only mode sets `backend = "local"` until you unload. Your original values and the first and
+  NPU-only mode sets `mode = "local"` until you unload. (Voxtype 1.1 renamed the old `backend` key to
+  `mode`; `mode` wins when both are present. amd-npu writes `mode`, removes `backend`, and renames
+  it on `enable` if your config still has it.) Your original values and the first and
   latest copies of the file are kept in `~/.config/amd-npu/voxtype/`, and `disable`/`remove` put
   the originals back. Edits are atomic and follow a symlinked config (dotfile managers keep working).
 - **Microphone:** the card's mic picker changes the system default input for all apps, like
