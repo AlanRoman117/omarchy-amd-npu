@@ -10,13 +10,15 @@ set -euo pipefail
 # Local API calls must never go through an HTTP proxy from the environment.
 export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}" NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
 
-VERSION=0.9.1
+VERSION=0.10.0
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
 PORT=52625
 URL="http://127.0.0.1:$PORT"
 WHISPER="whisper-v3:turbo"
+# The one embedding model FastFlowLM offers (EmbeddingGemma 300M); loaded with `amd-npu embed on`.
+EMBED_MODEL=embed-gemma:300m
 FLM_MODELS="$CONFIG_HOME/flm/models"
 WHISPER_DIR="$FLM_MODELS/Whisper-V3-Turbo-NPU2"
 UNIT="amd-npu.service"
@@ -384,15 +386,17 @@ env_get() {
   echo "${val:-$2}"
 }
 
-# env_write <llm> <asr 0|1> <ctx>. Keeps the user's browser allowlist.
+# env_write <llm> <asr 0|1> <ctx> [embed 0|1]. Keeps the user's browser allowlist and, unless
+# the fourth argument says otherwise, the embedding setting.
 env_write() {
-  local origins; origins=$(env_get AMD_NPU_ALLOWED_ORIGINS "")
+  local origins embed; origins=$(env_get AMD_NPU_ALLOWED_ORIGINS ""); embed=${4:-$(env_get FLM_EMBED 0)}
   mkdir -p "$STATE_DIR"
   printf '%s\n' \
     "# Written by amd-npu. FLM_LLM empty = Whisper only; FLM_ASR=0 = LLM has the NPU alone." \
+    "# FLM_EMBED=1 = the embedding model ($EMBED_MODEL) is loaded too (amd-npu embed on|off)." \
     "# AMD_NPU_ALLOWED_ORIGINS: space-separated browser origins allowed to use the API" \
     "# (e.g. http://localhost:8080). Empty = web pages are refused." \
-    "FLM_LLM=$1" "FLM_ASR=$2" "FLM_CTX=$3" "AMD_NPU_ALLOWED_ORIGINS=$origins" >"$SERVER_ENV"
+    "FLM_LLM=$1" "FLM_ASR=$2" "FLM_CTX=$3" "FLM_EMBED=$embed" "AMD_NPU_ALLOWED_ORIGINS=$origins" >"$SERVER_ENV"
 }
 
 # whisper | share | exclusive, from the saved settings
@@ -426,6 +430,22 @@ models_json() {
 }
 
 model_info() { models_json | jq -c --arg m "$1" '.[] | select(.name == $m)'; }
+
+# The embedding model's catalog entry (models_json leaves it out on purpose).
+embed_info() { flm list --json 2>/dev/null | jq -c --arg m "$EMBED_MODEL" '.models[] | select(.name == $m) | {name, installed, footprint}'; }
+embed_installed() { [[ $(embed_info | jq -r '.installed // false') == true ]]; }
+embed_enabled() { [[ $(env_get FLM_EMBED 0) == 1 ]]; }
+embed_status_json() {
+  jq -nc --arg name "$EMBED_MODEL" --argjson on "$(embed_enabled && echo true || echo false)" \
+    --argjson dl "$(embed_installed && echo true || echo false)" '{name: $name, enabled: $on, installed: $dl}'
+}
+
+# One embedding through the proxy; true when a vector comes back.
+embed_answers() {
+  local out; out=$(curl -s -m 60 -H 'content-type: application/json' \
+    -d "{\"model\":\"$EMBED_MODEL\",\"input\":\"hello\"}" "$URL/v1/embeddings" 2>/dev/null || true)
+  [[ $(jq -r '.data[0].embedding | length' <<<"$out" 2>/dev/null || echo 0) -gt 0 ]] 2>/dev/null
+}
 
 loaded_llm() {
   local ps; ps=$(curl -s -m 3 "$URL/api/ps" 2>/dev/null || true)
@@ -570,7 +590,12 @@ cmd_enable() {
     note "$llm isn't fully downloaded any more; starting with Whisper only (amd-npu pull $llm)"
     llm=""
   fi
-  env_write "$llm" 1 "$(env_get FLM_CTX -1)"
+  local embed; embed=$(env_get FLM_EMBED 0)
+  if [[ $embed == 1 ]] && ! embed_installed; then
+    note "$EMBED_MODEL isn't downloaded any more; starting without embeddings (amd-npu pull $EMBED_MODEL)"
+    embed=0
+  fi
+  env_write "$llm" 1 "$(env_get FLM_CTX -1)" "$embed"
   if [[ $legacy_cors == 1 ]]; then
     note "FLM_CORS=1 is retired. To let a browser chat UI in, list its origin in $SERVER_ENV:"
     note "  AMD_NPU_ALLOWED_ORIGINS=http://localhost:8080"
@@ -631,13 +656,13 @@ cmd_status_json() {
     --argjson rss "$(server_rss_mb)" --argjson npuMb "$(server_npu_mb)" --argjson ctx "$(env_get FLM_CTX -1)" \
     --argjson models "$(models_json | jq -c '[.[] | select(.installed) | {name, params, footprint}]')" \
     --argjson portOk "$port_ok" --argjson stale "$stale" \
-    --arg health "$health" --argjson released "$released" \
+    --arg health "$health" --argjson released "$released" --argjson embed "$(embed_status_json)" \
     '{service: $service, proxy: $proxy, server: $server, model: $model, modelName: $modelName, url: $url,
       portOk: $portOk, stale: $stale, released: $released, npuHealth: ($health | split(" ")[0]),
       npuDetail: ($health | sub("^[a-z]+ ?"; "")),
       firmware: $firmware, backend: $backend, last: $last, mode: $mode, rssMb: $rss, npuMb: $npuMb,
       llm: (if $llm == "" then null else ($llmInfo + {name: $llm, ctxSetting: $ctx}) end),
-      downloaded: $models}'
+      embed: $embed, downloaded: $models}'
 }
 
 last_latency() {
@@ -745,12 +770,56 @@ cmd_models() {
     while IFS=$'\t' read -r n p q f i; do printf '  %-22s %-7s %-6s %8s  %s\n' "$n" "$p" "$q" "$f" "$i"; done
   echo
   echo "  Download with: amd-npu pull <model>    Load with: amd-npu load <model> [--exclusive]"
+  echo "  Embeddings:    amd-npu pull $EMBED_MODEL, then amd-npu embed on"
+}
+
+# amd-npu embed on|off|status: the embedding model next to Whisper and any LLM. It answers
+# /v1/embeddings through the proxy. Like everything on this server, a request waits while another
+# one runs, so a big batch holds up dictation for a moment; the setting survives unload/resume.
+cmd_embed() {
+  case ${1:-status} in
+    status)
+      local st=off; embed_enabled && st=on
+      if embed_installed; then echo "embeddings: $st ($EMBED_MODEL downloaded)"
+      else echo "embeddings: $st ($EMBED_MODEL not downloaded: amd-npu pull $EMBED_MODEL)"; fi
+      ;;
+    on)
+      [[ -f $UNIT_FILE ]] || die "The NPU server isn't set up (amd-npu enable)."
+      not_released
+      npu_guard
+      embed_installed || die "$EMBED_MODEL isn't downloaded. Run: amd-npu pull $EMBED_MODEL"
+      if embed_enabled && server_up && embed_answers; then ok "Embeddings already on ($EMBED_MODEL)"; return; fi
+      step "Load $EMBED_MODEL next to Whisper"
+      local saved_env; saved_env=$(cat "$SERVER_ENV" 2>/dev/null || true)
+      env_write "$(env_get FLM_LLM "")" "$(env_get FLM_ASR 1)" "$(env_get FLM_CTX -1)" 1
+      restart_or_rollback "$EMBED_MODEL" "$saved_env"
+      embed_answers || rollback_and_die "$EMBED_MODEL" "$saved_env"
+      ok "$EMBED_MODEL answers at $URL/v1/embeddings"
+      if [[ $(env_get FLM_ASR 1) == 1 ]]; then
+        if cmd_ping >/dev/null; then ok "Whisper still answering"; else note "Whisper isn't answering (journalctl --user -u $UNIT)"; fi
+      fi
+      refresh_widget
+      ;;
+    off)
+      [[ -f $UNIT_FILE ]] || die "The NPU server isn't set up (amd-npu enable)."
+      not_released
+      npu_guard
+      embed_enabled || { ok "Embeddings already off"; return; }
+      step "Unload $EMBED_MODEL"
+      env_write "$(env_get FLM_LLM "")" "$(env_get FLM_ASR 1)" "$(env_get FLM_CTX -1)" 0
+      if systemctl --user is-enabled --quiet "$UNIT" 2>/dev/null || systemctl --user is-active --quiet "$UNIT"; then restart_server; fi
+      ok "Embeddings off"
+      refresh_widget
+      ;;
+    *) die "Usage: amd-npu embed on|off|status" ;;
+  esac
 }
 
 cmd_pull() {
   local m=${1:-}; [[ -n $m ]] || die "Usage: amd-npu pull <model>"
-  local info; info=$(model_info "$m")
-  [[ -n $info ]] || die "'$m' isn't an NPU LLM FastFlowLM knows. See: amd-npu models"
+  local info
+  if [[ $m == "$EMBED_MODEL" ]]; then info=$(embed_info); else info=$(model_info "$m"); fi
+  [[ -n $info ]] || die "'$m' isn't an NPU LLM FastFlowLM knows (or $EMBED_MODEL). See: amd-npu models"
   if [[ $(jq -r .installed <<<"$info") == true ]]; then ok "$m is already downloaded"; return; fi
   confirm "Download $m (~$(jq -r .footprint <<<"$info") GB in memory once loaded)?" || exit 1
   flm pull "$m"
@@ -1013,6 +1082,9 @@ Local models
   chat [model] [--think]
                         Chat in the terminal with the loaded model
   bench-llm [--raw]     Measure the loaded model's generation speed
+  embed on|off|status   Load the embedding model ($EMBED_MODEL, ~0.6 GB) next to Whisper
+                        for local RAG tools: POST $URL/v1/embeddings (it waits while
+                        another request is running, like everything on this server)
 
 Commands that start, stop or load on the NPU refuse while another program holds it
 (--force overrides) and while the NPU driver is stuck (reboot).
@@ -1031,7 +1103,7 @@ if [[ ${1:-} != hide-npu ]]; then
 fi
 
 case ${1:-help} in
-  check | install | enable | status | doctor | ping | models | pull | load | unload | chat | disable | remove | release | resume | help) cmd="cmd_$1"; shift; "$cmd" "$@" ;;
+  check | install | enable | status | doctor | ping | models | pull | load | unload | chat | embed | disable | remove | release | resume | help) cmd="cmd_$1"; shift; "$cmd" "$@" ;;
   bench-llm) shift; cmd_bench_llm "$@" ;;
   setup-state) shift; cmd_setup_state "$@" ;;
   hide-npu) shift; cmd_hide_npu "$@" ;;

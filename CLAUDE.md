@@ -16,15 +16,17 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 | `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.amd-npu`: `open`, `close`, `toggle`, `refresh`, `chat`. Chat opens a plain floating terminal (`xdg-terminal-exec --app-id=org.omarchy.terminal`), not `omarchy-launch-floating-terminal-with-presentation`, whose logo and "press any key" don't suit a chat |
 | `bin/amd-npu` | Setup, dictation and model commands (`amd-npu help`) |
 | `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin). Turns readline's bracketed paste back on (Python disables it), so a multi-line paste is one message; test with a pty sending `ESC[200~...ESC[201~` |
-| `systemd/amd-npu.service` | FastFlowLM on `127.0.0.1:6669` (a browser "bad port"), `--cors 0`. Reads `%E/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`); `%E` = `$XDG_CONFIG_HOME`, which FastFlowLM also uses. Sandboxed (0.8.0): `PrivateUsers`, read-only models dir, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`, `SystemCallFilter=@system-service`, empty capability set, `RestrictAddressFamilies`, `ProtectProc=invisible` and more; both units score 1.8 in `systemd-analyze --user security`. FastFlowLM writes nothing in `$HOME` at runtime. `Wants=` the proxy |
+| `systemd/amd-npu.service` | FastFlowLM on `127.0.0.1:6669` (a browser "bad port"), `--cors 0`. Reads `%E/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`, `FLM_EMBED`); `%E` = `$XDG_CONFIG_HOME`, which FastFlowLM also uses. Sandboxed (0.8.0): `PrivateUsers`, read-only models dir, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`, `SystemCallFilter=@system-service`, empty capability set, `RestrictAddressFamilies`, `ProtectProc=invisible` and more; both units score 1.8 in `systemd-analyze --user security`. FastFlowLM writes nothing in `$HOME` at runtime. `Wants=` the proxy |
 | `lib/proxy.py` + `systemd/amd-npu-proxy.service` | The public API on `127.0.0.1:52625`. `enable` copies `proxy.py` to `~/.local/share/amd-npu/`. Default-deny: only the exact method+path pairs in `ROUTES` are forwarded (`/api/pull`, `/load`, `/api/cancel`, `/api/npu/status` are refused); non-plain targets (`%`, trailing `/`, absolute form) get 400 (Python itself collapses a leading `//`). Refuses foreign `Origin`/`Sec-Fetch-Site` (allowlist `AMD_NPU_ALLOWED_ORIGINS`, `*` ignored), bad `Host`, non-JSON bodies on JSON endpoints, models that aren't downloaded (JSON `model` and `name`; multipart must have at most one real `model` field), duplicate/negative/CL+TE lengths. Sets Content-Length itself, 60 s per whole request, 16 concurrent requests (taken after the request arrives), and only forwards to 6669 if `/proc/net/tcp` shows it owned by this UID. `PartOf=amd-npu.service` |
 
 Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LLM + `FLM_ASR=1`),
 **exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `backend = "local"`, notifications both ways).
+`FLM_EMBED=1` (`amd-npu embed on`, 0.10.0) adds the embedding model in any mode; `env_write` keeps it
+unless told otherwise, so `unload`, `resume` and `enable` don't drop it.
 
 ## Current state (2026-10-02)
 
-- Version 0.9.1. PRs #1-#25 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.10.0 (embeddings: `amd-npu embed on|off|status`, `FLM_EMBED`, 2026-10-15). PRs #1-#25 are merged and `main` is what's installed. Public on GitHub since
   2026-09-30.
 - **This is already the "proper" plugin.** Omarchy has no plugin store or registry: a plugin is a
   git repo with `manifest.json`, installed with `omarchy plugin add <git url>`, and sharing means

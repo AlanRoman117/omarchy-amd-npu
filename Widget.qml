@@ -250,6 +250,14 @@ Panel {
   }
 
 
+  function embedText() {
+    var e = info.embed || null
+    if (!e) return "off"
+    if (e.enabled) return "on (" + e.name + ")"
+    if (e.installed) return "off (amd-npu embed on)"
+    return "off (not downloaded)"
+  }
+
   function backendText() {
     if (info.backend === "remote") return "NPU"
     if (info.backend === "-" || info.backend === undefined) return "not set up"
@@ -1045,6 +1053,7 @@ Panel {
           }
 
           InfoPair { label: "Whisper"; value: (root.info.modelName || "whisper-v3:turbo") + (root.info.model === false ? " (not downloaded)" : "") }
+          InfoPair { label: "Embeddings"; value: root.embedText() }
           InfoPair { label: "NPU firmware"; value: root.info.firmware || "-" }
           InfoPair { label: "Voxtype uses"; value: root.backendText() }
 

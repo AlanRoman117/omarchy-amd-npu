@@ -49,7 +49,7 @@
 - [ ] More measured models for the README (`gemma4-it:e4b`, `qwen3.5:2b`, `lfm2.5-it:1.2b`,
       `gpt-oss:20b`).
 - [ ] Context length picker in the card (`--ctx`); today it's CLI-only.
-- [ ] Embeddings (`embed-gemma:300m`, `--embed 1`) for local RAG tools.
+- [x] Embeddings (`embed-gemma:300m`, `--embed 1`) for local RAG tools: `amd-npu embed on|off|status` (0.10.0, 2026-10-15).
 - [ ] `status`: show NPU utilisation when FastFlowLM exposes it.
 
 ## Upstream (amdxdna)
