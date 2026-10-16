@@ -103,7 +103,7 @@ downloaded. (FastFlowLM's server downloads any model a request names, so arbitra
 
 **Embeddings.** `amd-npu pull embed-gemma:300m`, then `amd-npu embed on`, loads EmbeddingGemma 300M
 (about 0.6 GB) next to Whisper and any LLM. `POST http://127.0.0.1:52625/v1/embeddings` with
-`{"model": "embed-gemma:300m", "input": ["..."]}` returns the vectors (2,048-token inputs). It shares
+`{"model": "embed-gemma:300m", "input": ["..."]}` returns 768-dimensional vectors (inputs up to 2,048 tokens). It shares
 the one-request-at-a-time server, so a large batch delays a dictation that lands at the same moment;
 keep batches small. `amd-npu embed off` unloads it. The setting survives `unload`, `release`/`resume`
 and plugin updates; the card shows it under Details.
