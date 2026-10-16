@@ -308,6 +308,18 @@ because only NPU dictations are counted.
   - Tested: 200 half-open own connections give 32 admitted and 168 closed, peaking at 65 threads
     (32 workers plus their timers) and back to 1 afterwards. A proxy believing it runs as another UID
     closes everything at accept.
+- **Whisper + embeddings + LLM don't fit (0.11.3, found 2026-10-16 while retaking screenshots).**
+  - **Symptom:** with `FLM_EMBED=1` and Whisper on, a shared LLM fails to load. FastFlowLM logs
+    `DRM_IOCTL_AMDXDNA_CREATE_HWCTX IOCTL failed (err=-22)` and answers **HTTP 200** with
+    `{"error":"Failed to load … model!"}`. `/api/ps` then errors, and the card showed `llm: null`.
+  - **Why it went unnoticed:** `warm_llm` only checked for 200, so `load` claimed "Swapped".
+  - **Fixes:**
+    - `warm_llm` requires `.choices` in the body.
+    - A shared load pauses embeddings (`FLM_EMBED=0`, marker `$STATE_DIR/embed-paused-for-llm`, the
+      card reads "paused while the LLM shares the NPU").
+    - `unload`/`resume` restore them; `rollback_and_die` clears the marker if embeddings were restored.
+    - `embed on` refuses in share mode; `embed off` while paused just drops the marker.
+  - **NPU-only (LLM + embeddings, no Whisper) works**, so embeddings stay on there.
 - **Setup states:** when `amd-npu.service` doesn't exist, the probe asks `amd-npu setup-state`:
   `unsupported` (chip hidden), `driver`, `install`, `reboot` (`ulimit -l` isn't unlimited yet),
   `enable`, or `installed`. The card shows a short explanation, plus Set up / Finish setup / Check

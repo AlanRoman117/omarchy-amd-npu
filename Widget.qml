@@ -254,6 +254,7 @@ Panel {
     var e = info.embed || null
     if (!e) return "off"
     if (e.enabled) return "on (" + e.name + ")"
+    if (e.paused) return "paused while the LLM shares the NPU"
     if (e.installed) return "off (amd-npu embed on)"
     return "off (not downloaded)"
   }
