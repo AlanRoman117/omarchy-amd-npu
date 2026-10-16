@@ -26,7 +26,7 @@ unless told otherwise, so `unload`, `resume` and `enable` don't drop it.
 
 ## Current state (2026-10-02)
 
-- Version 0.10.0 (embeddings: `amd-npu embed on|off|status`, `FLM_EMBED`, 2026-10-15). PRs #1-#25 are merged and `main` is what's installed. Public on GitHub since
+- Version 0.10.0 (embeddings: `amd-npu embed on|off|status`, `FLM_EMBED`, 2026-10-15). PRs #1-#26 are merged and `main` is what's installed. Live-checked 2026-10-15 on the Z13: `embed on` next to Whisper, 0.26 s per embedding, dictation 3.3 s alone and +0.3 s behind one embedding call (+9 s behind a batch of 32: callers keep batches at 1 to 2 texts). Public on GitHub since
   2026-09-30.
 - **This is already the "proper" plugin.** Omarchy has no plugin store or registry: a plugin is a
   git repo with `manifest.json`, installed with `omarchy plugin add <git url>`, and sharing means
