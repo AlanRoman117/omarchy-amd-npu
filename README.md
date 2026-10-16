@@ -134,6 +134,8 @@ power panels:
   Omarchy's audio panel, and Voxtype uses it from the next dictation. The laptop's own mic is labelled
   "Built-in mic". If Voxtype's config locks dictation to one device (`[audio] device`), the card shows
   that device instead of the list.
+  **F9** switches between **Hold to talk** (Omarchy's push-to-talk) and **Tap to toggle** (tap once to
+  start, again to stop; the recording limit and the countdown still apply).
 
 **Chat** opens a floating terminal with `amd-npu chat` for a quick question or a short summary:
 paste the text (newlines and all, it goes as one message) and ask. `/exit` or Ctrl+D closes the
@@ -184,6 +186,7 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | `amd-npu release` | Frees the NPU and its memory (Whisper and any LLM); dictation uses Voxtype's CPU model; stays off across reboots |
 | `amd-npu resume` | Brings Whisper back on the NPU and dictation with it |
 | `amd-npu hide-npu <command>` | Runs a program with the NPU hidden from it, e.g. a ROCm app (see below) |
+| `amd-npu f9 toggle` / `hold` | Tap F9 to start and tap again to stop, or back to holding it (Omarchy's default); the card's **F9** row does the same |
 | `amd-npu disable` | Puts Voxtype's own `[whisper]` settings back and stops the server (frees the NPU) |
 | `amd-npu remove` | `disable` + delete the services; asks before deleting models, settings, old backups, packages and the memlock setting |
 
@@ -202,11 +205,18 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   warning).
 - **Models:** `~/.config/flm/models/`.
 - **Voxtype config,** only after you agree: in `~/.config/voxtype/config.toml`, `[whisper]` gets
-  `backend = "remote"`, `remote_endpoint = "http://127.0.0.1:52625"` and `remote_model`, plus
+  `mode = "remote"`, `remote_endpoint = "http://127.0.0.1:52625"` and `remote_model`, plus
   `remote_timeout_secs = 180` if yours is lower. The endpoint has no `/v1`; Voxtype adds it.
-  NPU-only mode sets `backend = "local"` until you unload. Your original values and the first and
+  NPU-only mode sets `mode = "local"` until you unload. (Voxtype 1.1 renamed the old `backend` key to
+  `mode`; `mode` wins when both are present. amd-npu writes `mode`, removes `backend`, and renames
+  it on `enable` if your config still has it.) Your original values and the first and
   latest copies of the file are kept in `~/.config/amd-npu/voxtype/`, and `disable`/`remove` put
   the originals back. Edits are atomic and follow a symlinked config (dotfile managers keep working).
+- **F9 mode,** only when you pick **Tap to toggle**: one file,
+  `~/.local/state/omarchy/toggles/hypr/amd-npu-f9-toggle.lua`, which unbinds Omarchy's two F9
+  push-to-talk bindings and binds F9 to `voxtype record toggle`. Omarchy loads that folder after your
+  own bindings, the same way its own toggles work; your `bindings.lua` isn't touched. **Hold to talk**
+  (or `amd-npu remove`) deletes the file and reloads Hyprland.
 - **Microphone:** the card's mic picker changes the system default input for all apps, like
   Omarchy's audio panel; nothing changes unless you pick one.
 

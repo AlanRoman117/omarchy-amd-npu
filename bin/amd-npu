@@ -10,7 +10,7 @@ set -euo pipefail
 # Local API calls must never go through an HTTP proxy from the environment.
 export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}" NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
 
-VERSION=0.10.0
+VERSION=0.11.0
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
@@ -38,6 +38,9 @@ VOX_STATE="$STATE_DIR/voxtype"
 VOX_ORIGINAL="$VOX_STATE/original-whisper.json"
 # Present while amd-npu has switched Voxtype to its CPU model for an NPU-only LLM.
 VOX_EXCLUSIVE="$VOX_STATE/exclusive"
+# F9 as a toggle: Omarchy loads every .lua in this directory after its own and the user's bindings
+# (default/hypr/toggles.lua), the same mechanism its own `omarchy-hyprland-toggle` flags use.
+F9_TOGGLE="$HOME/.local/state/omarchy/toggles/hypr/amd-npu-f9-toggle.lua"
 # Present while the NPU is released (server stopped and disabled until `amd-npu resume`).
 RELEASED="$STATE_DIR/released"
 PLUGIN_ID="alanroman117.amd-npu"
@@ -126,7 +129,7 @@ voxtype_cfg() {
   python3 - "$VOXTYPE_CONFIG" "$@" <<'PY'
 import json, os, re, sys, tempfile, tomllib
 path, op, args = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3:]
-MANAGED = ("backend", "remote_endpoint", "remote_model", "remote_timeout_secs")
+MANAGED = ("mode", "backend", "remote_endpoint", "remote_model", "remote_timeout_secs")
 text = open(path).read()
 if op in ("get", "dump"):
     try:
@@ -191,9 +194,14 @@ os.replace(tmp, path)
 PY
 }
 
+# Voxtype 1.1 renamed [whisper] backend to mode; when both are set, mode wins (tested with 1.1.1:
+# mode = "local" + backend = "remote" transcribes locally). Read mode first, then the old name.
 voxtype_backend() {
   [[ -f $VOXTYPE_CONFIG ]] || { echo "-"; return; }
-  local b; b=$(voxtype_cfg get backend)
+  local m b
+  m=$(voxtype_cfg get mode)
+  [[ -n $m ]] && { echo "$m"; return; }
+  b=$(voxtype_cfg get backend)
   echo "${b:-local}"
 }
 
@@ -226,7 +234,8 @@ timeout_ok() { [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v t="$1" 'BEGIN { exit !(
 
 voxtype_changes_text() {
   echo "  Voxtype's config ($VOXTYPE_CONFIG), [whisper] section:"
-  echo "    backend = \"remote\", remote_endpoint = \"$URL\", remote_model = \"$WHISPER\""
+  echo "    mode = \"remote\", remote_endpoint = \"$URL\", remote_model = \"$WHISPER\""
+  [[ -n $(voxtype_cfg get backend) ]] && echo "    the old 'backend' line is removed (Voxtype 1.1 renamed it to 'mode')"
   timeout_ok "$(voxtype_cfg get remote_timeout_secs)" || echo "    remote_timeout_secs = 180 (long dictations take up to ~1 min to transcribe)"
   echo "  Your current values are saved, and 'amd-npu disable' or 'remove' puts them back."
 }
@@ -239,14 +248,14 @@ voxtype_use() {
     voxtype_on_npu && return 0
     voxtype_save_original
     voxtype_backup
-    local args=(backend=remote remote_endpoint="$URL" remote_model="$WHISPER")
+    local args=(mode=remote -backend remote_endpoint="$URL" remote_model="$WHISPER")
     timeout_ok "$(voxtype_cfg get remote_timeout_secs)" || args+=(remote_timeout_secs:=180)
     voxtype_cfg set "${args[@]}"
   else
     [[ $(voxtype_backend) == local ]] && return 0
     voxtype_save_original
     voxtype_backup
-    voxtype_cfg set backend=local
+    voxtype_cfg set mode=local -backend
   fi
   systemctl --user restart voxtype.service 2>/dev/null || true
 }
@@ -261,7 +270,7 @@ voxtype_restore() {
   fi
   voxtype_backup
   local k v args=()
-  for k in backend remote_endpoint remote_model remote_timeout_secs; do
+  for k in mode backend remote_endpoint remote_model remote_timeout_secs; do
     v=$(jq -c --arg k "$k" 'if has($k) then .[$k] else empty end' "$VOX_ORIGINAL")
     if [[ -n $v ]]; then args+=("$k:=$v"); else args+=("-$k"); fi
   done
@@ -612,7 +621,13 @@ cmd_enable() {
 
   step "Voxtype"
   if [[ -f $VOXTYPE_CONFIG ]]; then
-    if voxtype_on_npu; then
+    if voxtype_on_npu && [[ -z $(voxtype_cfg get mode) && -n $(voxtype_cfg get backend) ]]; then
+      # Same setting under Voxtype 1.1's new name; drops the deprecation warning on every dictation.
+      voxtype_backup
+      voxtype_cfg set mode=remote -backend
+      systemctl --user restart voxtype.service 2>/dev/null || true
+      ok "Already pointed at the NPU; renamed Voxtype's deprecated 'backend' setting to 'mode'"
+    elif voxtype_on_npu; then
       ok "Already pointed at the NPU"
     elif voxtype_exclusive_off; then
       ok "Dictation back on the NPU"
@@ -656,9 +671,9 @@ cmd_status_json() {
     --argjson rss "$(server_rss_mb)" --argjson npuMb "$(server_npu_mb)" --argjson ctx "$(env_get FLM_CTX -1)" \
     --argjson models "$(models_json | jq -c '[.[] | select(.installed) | {name, params, footprint}]')" \
     --argjson portOk "$port_ok" --argjson stale "$stale" \
-    --arg health "$health" --argjson released "$released" --argjson embed "$(embed_status_json)" \
+    --arg health "$health" --argjson released "$released" --argjson embed "$(embed_status_json)" --arg f9 "$(f9_mode)" \
     '{service: $service, proxy: $proxy, server: $server, model: $model, modelName: $modelName, url: $url,
-      portOk: $portOk, stale: $stale, released: $released, npuHealth: ($health | split(" ")[0]),
+      portOk: $portOk, stale: $stale, released: $released, f9: $f9, npuHealth: ($health | split(" ")[0]),
       npuDetail: ($health | sub("^[a-z]+ ?"; "")),
       firmware: $firmware, backend: $backend, last: $last, mode: $mode, rssMb: $rss, npuMb: $npuMb,
       llm: (if $llm == "" then null else ($llmInfo + {name: $llm, ctxSetting: $ctx}) end),
@@ -1004,6 +1019,37 @@ cmd_resume() {
   refresh_widget
 }
 
+# F9 mode: "hold" (Omarchy's push-to-talk) or "toggle" (tap to start, tap to stop).
+f9_mode() { [[ -f $F9_TOGGLE ]] && echo toggle || echo hold; }
+
+cmd_f9() {
+  case ${1:-status} in
+    status) f9_mode; return ;;
+    toggle)
+      [[ $(f9_mode) == toggle ]] && { ok "F9 already toggles dictation"; return; }
+      mkdir -p "$(dirname "$F9_TOGGLE")"
+      cp "$ROOT/hypr/amd-npu-f9-toggle.lua" "$F9_TOGGLE" ;;
+    hold)
+      [[ $(f9_mode) == hold ]] && { ok "F9 is already push-to-talk"; return; }
+      rm -f "$F9_TOGGLE" ;;
+    *) die "Usage: amd-npu f9 [toggle|hold|status]" ;;
+  esac
+  hyprctl reload >/dev/null 2>&1 || true
+  local errors; errors=$(hyprctl configerrors 2>/dev/null | grep -v '^$' || true)
+  if [[ -n $errors && $1 == toggle ]]; then
+    rm -f "$F9_TOGGLE"
+    hyprctl reload >/dev/null 2>&1 || true
+    die "Hyprland rejected the F9 toggle, so push-to-talk was kept: $errors"
+  fi
+  local binds; binds=$(hyprctl binds -j 2>/dev/null | jq -r '[.[] | select(.key == "F9" and .modmask == 0)] | length' 2>/dev/null || echo "?")
+  if [[ $1 == toggle ]]; then
+    ok "F9 now toggles dictation: tap to start, tap again to stop ($binds F9 binding)"
+  else
+    ok "F9 is push-to-talk again: hold to record, release to stop ($binds F9 bindings)"
+  fi
+  refresh_widget
+}
+
 # Runs a program with the NPU hidden, so ROCm (which opens every AIE device it finds) uses the GPU
 # only and can't disturb the NPU server.
 cmd_hide_npu() {
@@ -1016,6 +1062,11 @@ cmd_remove() {
   cmd_disable
   step "Remove"
   rm -f "$UNIT_FILE" "$PROXY_UNIT_FILE" "$UNIT_FILE".bak.* "$PROXY_UNIT_FILE".bak.*
+  if [[ -f $F9_TOGGLE ]]; then
+    rm -f "$F9_TOGGLE"
+    hyprctl reload >/dev/null 2>&1 || true
+    ok "F9 is push-to-talk again"
+  fi
   rm -rf "$PROXY_DIR"
   systemctl --user daemon-reload
   ok "Removed $UNIT and $PROXY_UNIT"
@@ -1067,6 +1118,8 @@ Setup
                         enable or installed
 
 Dictation
+  f9 [toggle|hold|status]
+                        Tap F9 to start and again to stop, or hold it (Omarchy's default)
   status [--json]       What's running on the NPU
   doctor                status + a live transcription request
   ping                  Quiet Whisper check: "ok <seconds>" or "fail <code>"
@@ -1107,6 +1160,7 @@ case ${1:-help} in
   bench-llm) shift; cmd_bench_llm "$@" ;;
   setup-state) shift; cmd_setup_state "$@" ;;
   hide-npu) shift; cmd_hide_npu "$@" ;;
+  f9) shift; cmd_f9 "$@" ;;
   -h | --help) cmd_help ;;
   -v | --version) echo "$VERSION" ;;
   *) cmd_help; exit 1 ;;

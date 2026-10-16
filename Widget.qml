@@ -1102,6 +1102,36 @@ Panel {
             }
           }
 
+          // F9: hold to talk (Omarchy's default) or tap to start / tap to stop (amd-npu f9)
+          Row {
+            id: f9Row
+            width: parent.width
+            spacing: Style.space(6)
+            readonly property real labelWidth: silenceLabel.implicitWidth + Style.space(4)
+            readonly property real cellWidth: (width - labelWidth - spacing * 2) / 2
+
+            InfoLabel {
+              width: f9Row.labelWidth
+              anchors.verticalCenter: parent.verticalCenter
+              text: "F9"
+            }
+
+            Repeater {
+              model: [{ mode: "hold", label: "Hold to talk" }, { mode: "toggle", label: "Tap to toggle" }]
+              Button {
+                required property var modelData
+                width: f9Row.cellWidth
+                text: modelData.label
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                active: (root.info.f9 || "hold") === modelData.mode
+                onClicked: if (!active) root.runAction("f9", ["f9", modelData.mode])
+              }
+            }
+          }
+
           // When the countdown says a mic isn't hearing anything
           Row {
             id: silenceRow
