@@ -35,6 +35,7 @@ import os
 import re
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import threading
@@ -122,23 +123,35 @@ _BAD_MULTIPART = (email.errors.NoBoundaryInMultipartDefect, email.errors.StartBo
                   email.errors.CloseBoundaryNotFoundDefect, email.errors.MultipartInvariantViolationDefect)
 
 
-def peer_uid(client_address):
-    """The UID owning the client end of an accepted loopback connection, from /proc/net/tcp(6):
-    the entry whose local port is the client's port and whose remote port is ours. None if not found.
-    Under PrivateUsers=, other accounts' sockets show as the overflow UID, never ours."""
-    host, port = client_address[0], client_address[1]
-    local_suffix, remote_suffix = f":{port:04X}", f":{LISTEN_PORT:04X}"
-    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
-        try:
-            with open(path) as f:
-                next(f)
-                for line in f:
-                    fields = line.split()
-                    if fields[1].endswith(local_suffix) and fields[2].endswith(remote_suffix):
-                        return int(fields[7])
-        except (OSError, ValueError, IndexError, StopIteration):
-            continue
-    return None
+def proc_net_addr(ip, port):
+    """An IPv4 address and port as /proc/net/tcp prints them: the address as a host-order 32-bit
+    hex number (127.0.0.1 is 0100007F on x86), then the port in hex."""
+    return "%08X:%04X" % (struct.unpack("=I", socket.inet_aton(ip))[0], port)
+
+
+def match_peer_uid(lines, client, server):
+    """The UID of the one ESTABLISHED socket whose local end is `client` and remote end is `server`
+    (the full TCP 4-tuple, unique for a live connection), or None if there isn't exactly one."""
+    want_local, want_remote = proc_net_addr(*client), proc_net_addr(*server)
+    uids = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) > 7 and fields[1] == want_local and fields[2] == want_remote and fields[3] == "01":
+            uids.append(int(fields[7]))
+    return uids[0] if len(uids) == 1 else None
+
+
+def peer_uid(client_address, server_address):
+    """The UID owning the client end of an accepted loopback connection. The proxy listens on IPv4
+    only, so the client's socket is in /proc/net/tcp. Under PrivateUsers=, other accounts' sockets
+    show as the overflow UID, never ours. Matching both addresses and ports matters: loopback is all
+    of 127.0.0.0/8, so ports alone can collide with another account's unrelated connection."""
+    try:
+        with open("/proc/net/tcp") as f:
+            next(f)
+            return match_peer_uid(f, client_address[:2], server_address[:2])
+    except (OSError, ValueError, StopIteration):
+        return None
 
 
 def multipart_models(body, content_type):
@@ -394,7 +407,12 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
     def process_request(self, request, client_address):
-        if peer_uid(client_address) != os.getuid() or not CONNECTIONS.acquire(blocking=False):
+        try:
+            server_address = request.getsockname()
+        except OSError:
+            server_address = None
+        if (server_address is None or peer_uid(client_address, server_address) != os.getuid()
+                or not CONNECTIONS.acquire(blocking=False)):
             self.shutdown_request(request)
             return
         try:

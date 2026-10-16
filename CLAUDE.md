@@ -295,9 +295,13 @@ because only NPU dictations are counted.
 - **Proxy admission (0.11.1, after a marketplace reviewer's note on #10983).** Previously every
   accepted connection got a thread and a deadline timer before the 16-request cap applied, so another
   account could hold partial requests open and exhaust threads and fds.
-  - `Server.process_request` now runs `peer_uid()` before any thread exists: it finds the
-    `/proc/net/tcp(6)` entry whose local port is the client's and whose remote port is 52625, and
-    reads its UID.
+  - `Server.process_request` now runs `peer_uid()` before any thread exists. Since 0.11.2 (the
+    reviewer's second note) it matches the full TCP 4-tuple in `/proc/net/tcp`: local = the client's
+    ip:port, remote = the accepted socket's `getsockname()`, state ESTABLISHED (01), and exactly one
+    entry, otherwise refused. Ports alone collided: loopback is all of 127.0.0.0/8, so an unrelated
+    127.0.0.2→127.0.0.3:52625 socket shares the ports. That was reproduced live, and a crafted-lines
+    test shows 0.11.1 picking the decoy's UID. Addresses use `proc_net_addr()`
+    (host-order hex, `0100007F` for 127.0.0.1). The listener is IPv4-only, so only `/proc/net/tcp`.
   - Other UIDs are closed at once. This UID's connections are capped by
     `CONNECTIONS = BoundedSemaphore(32)`, released in `process_request_thread`.
   - Tested: 200 half-open own connections give 32 admitted and 168 closed, peaking at 65 threads
