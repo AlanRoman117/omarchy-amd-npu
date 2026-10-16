@@ -283,6 +283,15 @@ because only NPU dictations are counted.
   NPU. A pacman upgrade doesn't restart the running daemon: check
   `systemctl --user show voxtype -p ActiveEnterTimestamp` against the upgrade time before trusting
   "it still works".
+- **F9 toggle (0.11.0).** `hypr/amd-npu-f9-toggle.lua` (`hl.unbind("F9")` + `o.bind("F9", …,
+  "voxtype record toggle")`) is copied to `~/.local/state/omarchy/toggles/hypr/`, which Omarchy's
+  `default/hypr/toggles.lua` loads after the defaults and the user's bindings (the
+  `omarchy-hyprland-toggle` mechanism). Then `hyprctl reload`; if `hyprctl configerrors` reports
+  anything, the file is removed and Hyprland reloaded again. `hl.unbind("F9")` removes both of
+  Omarchy's F9 bindings (press start, release stop): `hyprctl binds -j` shows 1 F9 binding in toggle
+  mode and 2 in hold mode. `status --json` has `f9`; the card's F9 row runs `amd-npu f9 <mode>`.
+  **Don't test by sending F9 with wtype**: if the binding misses, the key lands in the focused window.
+  Run `voxtype record toggle`, then `record cancel`.
 - **Setup states:** when `amd-npu.service` doesn't exist, the probe asks `amd-npu setup-state`:
   `unsupported` (chip hidden), `driver`, `install`, `reboot` (`ulimit -l` isn't unlimited yet),
   `enable`, or `installed`. The card shows a short explanation, plus Set up / Finish setup / Check
