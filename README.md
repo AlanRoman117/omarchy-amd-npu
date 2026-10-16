@@ -246,8 +246,10 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   plugin leaves PipeWire's device switching alone rather than change system behaviour.
 - **Don't force NPU firmware versions or install `amdxdna-dkms`** on a current kernel. A mismatch can
   make the NPU disappear.
-- **The API on `127.0.0.1:52625` has no password.** Programs on this machine, under any user, can
-  use it. That's fine on a single-user laptop. On a shared machine, another account could take the
+- **The API on `127.0.0.1:52625` has no password, but only your account can use it.** The proxy looks
+  up who owns each incoming connection and closes other accounts' connections immediately; your own
+  are capped at 32 at once. (FastFlowLM's internal port 6669 has no such check; browsers can't
+  reach it, but other local accounts can.) That's fine on a single-user laptop. On a shared machine, another account could take the
   port while the service is stopped, and Voxtype would then send it your audio and type whatever
   text it returns. The card shows **PORT TAKEN** and `amd-npu status` warns when the port belongs to
   another account, and the proxy only forwards to a FastFlowLM port that belongs to you.
