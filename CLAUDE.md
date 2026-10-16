@@ -292,6 +292,17 @@ because only NPU dictations are counted.
   mode and 2 in hold mode. `status --json` has `f9`; the card's F9 row runs `amd-npu f9 <mode>`.
   **Don't test by sending F9 with wtype**: if the binding misses, the key lands in the focused window.
   Run `voxtype record toggle`, then `record cancel`.
+- **Proxy admission (0.11.1, after a marketplace reviewer's note on #10983).** Previously every
+  accepted connection got a thread and a deadline timer before the 16-request cap applied, so another
+  account could hold partial requests open and exhaust threads and fds.
+  - `Server.process_request` now runs `peer_uid()` before any thread exists: it finds the
+    `/proc/net/tcp(6)` entry whose local port is the client's and whose remote port is 52625, and
+    reads its UID.
+  - Other UIDs are closed at once. This UID's connections are capped by
+    `CONNECTIONS = BoundedSemaphore(32)`, released in `process_request_thread`.
+  - Tested: 200 half-open own connections give 32 admitted and 168 closed, peaking at 65 threads
+    (32 workers plus their timers) and back to 1 afterwards. A proxy believing it runs as another UID
+    closes everything at accept.
 - **Setup states:** when `amd-npu.service` doesn't exist, the probe asks `amd-npu setup-state`:
   `unsupported` (chip hidden), `driver`, `install`, `reboot` (`ulimit -l` isn't unlimited yet),
   `enable`, or `installed`. The card shows a short explanation, plus Set up / Finish setup / Check

@@ -17,6 +17,8 @@ this proxy is the only way in on the normal port. It forwards only an allowlist 
   - malformed lengths (negative, non-numeric, or both Content-Length and Transfer-Encoding)
   - forwarding to 6669 when that port isn't held by this user (another account on a shared
     machine could otherwise receive the audio and choose the text that gets typed)
+  - connections from other accounts, closed at accept before any thread exists, and more than
+    MAX_CONNECTIONS of this user's own at once
 
 It strips FastFlowLM's own CORS headers, adding proper ones only for allow-listed origins, sets
 Content-Length itself, times out idle clients and caps concurrent requests. Request bodies are
@@ -63,6 +65,8 @@ CLIENT_TIMEOUT = 120          # seconds a single read may stall
 REQUEST_DEADLINE = 60         # seconds to deliver the whole request (headers and body)
 MAX_REQUESTS = 16             # FastFlowLM answers one at a time; more than this is a flood
 SLOTS = threading.BoundedSemaphore(MAX_REQUESTS)
+MAX_CONNECTIONS = 32          # open connections (each one a thread); more are closed at accept
+CONNECTIONS = threading.BoundedSemaphore(MAX_CONNECTIONS)
 
 _models_lock = threading.Lock()
 _models_cache = (0.0, set())
@@ -116,6 +120,25 @@ def upstream_owned():
 
 _BAD_MULTIPART = (email.errors.NoBoundaryInMultipartDefect, email.errors.StartBoundaryNotFoundDefect,
                   email.errors.CloseBoundaryNotFoundDefect, email.errors.MultipartInvariantViolationDefect)
+
+
+def peer_uid(client_address):
+    """The UID owning the client end of an accepted loopback connection, from /proc/net/tcp(6):
+    the entry whose local port is the client's port and whose remote port is ours. None if not found.
+    Under PrivateUsers=, other accounts' sockets show as the overflow UID, never ours."""
+    host, port = client_address[0], client_address[1]
+    local_suffix, remote_suffix = f":{port:04X}", f":{LISTEN_PORT:04X}"
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as f:
+                next(f)
+                for line in f:
+                    fields = line.split()
+                    if fields[1].endswith(local_suffix) and fields[2].endswith(remote_suffix):
+                        return int(fields[7])
+        except (OSError, ValueError, IndexError, StopIteration):
+            continue
+    return None
 
 
 def multipart_models(body, content_type):
@@ -364,8 +387,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """Admission happens before any thread or timer exists for a connection: connections from other
+    accounts are closed at once (the API is for this user's programs only), and this user's own are
+    capped at MAX_CONNECTIONS, so half-sent requests can't exhaust threads or file descriptors."""
     daemon_threads = True
     allow_reuse_address = True
+
+    def process_request(self, request, client_address):
+        if peer_uid(client_address) != os.getuid() or not CONNECTIONS.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            CONNECTIONS.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            CONNECTIONS.release()
 
 
 def main():
