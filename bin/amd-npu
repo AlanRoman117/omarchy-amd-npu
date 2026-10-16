@@ -10,7 +10,7 @@ set -euo pipefail
 # Local API calls must never go through an HTTP proxy from the environment.
 export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}" NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
 
-VERSION=0.11.2
+VERSION=0.11.3
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
@@ -444,9 +444,14 @@ model_info() { models_json | jq -c --arg m "$1" '.[] | select(.name == $m)'; }
 embed_info() { flm list --json 2>/dev/null | jq -c --arg m "$EMBED_MODEL" '.models[] | select(.name == $m) | {name, installed, footprint}'; }
 embed_installed() { [[ $(embed_info | jq -r '.installed // false') == true ]]; }
 embed_enabled() { [[ $(env_get FLM_EMBED 0) == 1 ]]; }
+# Whisper, the embedding model and an LLM don't fit on the NPU together (the third model's hardware
+# context is refused). A shared LLM therefore pauses embeddings; this marker brings them back on
+# unload/resume. NPU-only mode (no Whisper) keeps them.
+EMBED_PAUSED="$STATE_DIR/embed-paused-for-llm"
 embed_status_json() {
   jq -nc --arg name "$EMBED_MODEL" --argjson on "$(embed_enabled && echo true || echo false)" \
-    --argjson dl "$(embed_installed && echo true || echo false)" '{name: $name, enabled: $on, installed: $dl}'
+    --argjson dl "$(embed_installed && echo true || echo false)" --argjson paused "$([[ -f $EMBED_PAUSED ]] && echo true || echo false)" \
+    '{name: $name, enabled: $on, installed: $dl, paused: $paused}'
 }
 
 # One embedding through the proxy; true when a vector comes back.
@@ -481,11 +486,13 @@ server_npu_mb() {
 }
 
 # Loads (or swaps to) a model on the running server with a 1-token request.
+# FastFlowLM answers 200 with {"error": "Failed to load … model!"} when a model can't be placed on
+# the NPU, so success needs an actual reply in the body, not just the status code.
 warm_llm() {
-  local code
-  code=$(curl -s -m 300 -o /dev/null -w '%{http_code}' "$URL/v1/chat/completions" -H 'Content-Type: application/json' \
+  local body
+  body=$(curl -s -m 300 "$URL/v1/chat/completions" -H 'Content-Type: application/json' \
     -d "$(jq -nc --arg m "$1" '{model: $m, messages: [{role: "user", content: "hi"}], max_tokens: 1}')" || true)
-  [[ $code == 200 ]]
+  jq -e '.choices | length > 0' <<<"$body" >/dev/null 2>&1
 }
 
 require_downloaded_llm() {
@@ -804,6 +811,7 @@ cmd_embed() {
       npu_guard
       embed_installed || die "$EMBED_MODEL isn't downloaded. Run: amd-npu pull $EMBED_MODEL"
       if embed_enabled && server_up && embed_answers; then ok "Embeddings already on ($EMBED_MODEL)"; return; fi
+      [[ $(mode) == share ]] && die "The NPU can't hold Whisper, embeddings and $(env_get FLM_LLM "") together. Unload the model (embeddings come back on their own), or load it NPU-only."
       step "Load $EMBED_MODEL next to Whisper"
       local saved_env; saved_env=$(cat "$SERVER_ENV" 2>/dev/null || true)
       env_write "$(env_get FLM_LLM "")" "$(env_get FLM_ASR 1)" "$(env_get FLM_CTX -1)" 1
@@ -819,6 +827,7 @@ cmd_embed() {
       [[ -f $UNIT_FILE ]] || die "The NPU server isn't set up (amd-npu enable)."
       not_released
       npu_guard
+      if [[ -f $EMBED_PAUSED ]]; then rm -f "$EMBED_PAUSED"; ok "Embeddings stay off after you unload the model"; return; fi
       embed_enabled || { ok "Embeddings already off"; return; }
       step "Unload $EMBED_MODEL"
       env_write "$(env_get FLM_LLM "")" "$(env_get FLM_ASR 1)" "$(env_get FLM_CTX -1)" 0
@@ -881,10 +890,16 @@ cmd_load() {
     fi
   else
     step "Load $m next to Whisper"
-    env_write "$m" 1 "$ctx"
-    # Live swap when the running server already has Whisper and the same context
-    # setting; otherwise restart it with the new settings.
-    if [[ $prev != exclusive && $ctx == "$prev_ctx" ]] && systemctl --user is-active --quiet "$UNIT" && server_up && warm_llm "$m"; then
+    local embed_paused_now=0
+    if embed_enabled; then
+      note "Embeddings pause while $m shares the NPU with Whisper (the NPU can't hold all three); unloading brings them back"
+      touch "$EMBED_PAUSED"
+      embed_paused_now=1
+    fi
+    if ((embed_paused_now)); then env_write "$m" 1 "$ctx" 0; else env_write "$m" 1 "$ctx"; fi
+    # Live swap when the running server already has Whisper, the same context setting and no
+    # embeddings change; otherwise restart it with the new settings.
+    if [[ $prev != exclusive && $ctx == "$prev_ctx" ]] && ((!embed_paused_now)) && systemctl --user is-active --quiet "$UNIT" && server_up && warm_llm "$m"; then
       ok "Swapped to $m without restarting Whisper"
     else
       restart_or_rollback "$m" "$saved_env"
@@ -911,6 +926,8 @@ cmd_load() {
 # restart with it, and stop with an error, so a bad load never leaves the service down.
 rollback_and_die() {
   printf '%s\n' "$2" >"$SERVER_ENV"
+  # The restored settings say whether embeddings are on; a pause marker for them no longer applies.
+  [[ $(env_get FLM_EMBED 0) == 1 ]] && rm -f "$EMBED_PAUSED"
   try_restart_server || true
   refresh_widget
   die "$1 didn't start on the NPU; previous settings restored (journalctl --user -u $UNIT)."
@@ -925,7 +942,13 @@ cmd_unload() {
   npu_guard
   local prev; prev=$(mode)
   step "Unload the local model"
-  env_write "" 1 -1
+  if [[ -f $EMBED_PAUSED ]]; then
+    env_write "" 1 -1 1
+    rm -f "$EMBED_PAUSED"
+    ok "Embeddings back on ($EMBED_MODEL)"
+  else
+    env_write "" 1 -1
+  fi
   if systemctl --user is-enabled --quiet "$UNIT" 2>/dev/null || systemctl --user is-active --quiet "$UNIT"; then
     restart_server
     ok "Whisper only on the NPU"
@@ -1009,7 +1032,7 @@ cmd_resume() {
   [[ -f $UNIT_FILE ]] || die "The NPU server isn't set up (amd-npu enable)."
   npu_guard
   step "Resume the NPU"
-  env_write "" 1 "$(env_get FLM_CTX -1)"
+  if [[ -f $EMBED_PAUSED ]]; then env_write "" 1 "$(env_get FLM_CTX -1)" 1; rm -f "$EMBED_PAUSED"; else env_write "" 1 "$(env_get FLM_CTX -1)"; fi
   systemctl --user enable "$UNIT" >/dev/null 2>&1
   restart_server
   rm -f "$RELEASED"
