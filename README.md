@@ -114,11 +114,11 @@ A chip icon on the right of the bar: bright when the NPU server is up, dimmed wh
 hidden when it isn't set up. Click it for a card in the style of Omarchy's Wi-Fi, Bluetooth and
 power panels:
 
-| Whisper only | Sharing with an LLM | LLM on the NPU alone |
-|:---:|:---:|:---:|
-| <img src="docs/screenshots/card-whisper.png" width="260" alt="Card with Whisper only: dictation on the NPU, downloaded models listed with Share / NPU only and Load"> | <img src="docs/screenshots/card-share.png" width="260" alt="Card with qwen3.5:0.8b loaded next to Whisper: model details, memory, API address, Test LLM, Chat and Unload"> | <img src="docs/screenshots/card-exclusive.png" width="260" alt="Card with qwen3.5:0.8b on the NPU alone: dictation switch off, Voxtype on its CPU model"> |
+| Whisper only | Sharing with an LLM | LLM on the NPU alone | Released |
+|:---:|:---:|:---:|:---:|
+| <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models with Share / NPU only and Load, dictation details, microphone, F9 mode and silence warning"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with qwen3.5:0.8b loaded next to Whisper: model details, memory, API address, Test LLM, Chat and Unload"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with qwen3.5:0.8b on the NPU alone: Share the NPU with dictation button, Voxtype on its CPU model"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model"> |
 
-- **Header:** READY, READY + LLM, LLM ONLY, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
+- **Header:** READY, READY + LLM, LLM ONLY, RELEASED, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
   your last dictation time.
 - **NPU:** the on/off switch, showing what the NPU holds (e.g. "On: dictation + qwen3.5:0.8b (2.0 GB
   NPU + 0.9 GB)"). Off **releases** the NPU: the server and any model stop, their memory is freed at

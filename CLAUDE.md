@@ -107,9 +107,10 @@ clone once installed with `omarchy plugin add`). Edits here don't reach it until
 
 `preview.png` at the repo root (README top and the marketplace's card image) is a real 1920x1080 shot in Osaka Jade: card open, countdown with live waveform, bar chip timer. Retake it on an empty workspace (`hyprctl dispatch 'hl.dsp.focus({ workspace = "9" })'`), open the card, `voxtype record start`, someone talking, capture within ~3 s (before the silence warning), `record cancel`, switch back; strip metadata with `magick -strip -define png:exclude-chunks=date,time`.
 
-Card states: `card-whisper.png`, `card-share.png`, `card-exclusive.png` (qwen3.5:0.8b) and
-`card-setup.png` (the forced `install` state), all retaken in 0.7.0 in a dark theme on the 1080p HDMI
-screen. To retake them:
+Card states: `card-whisper.png`, `card-share.png`, `card-exclusive.png`, `card-released.png` (qwen3.5:0.8b)
+and `card-setup.png` (the forced `install` state), retaken 2026-10-16 in Osaka Jade on the Z13 screen
+(1600x1000 logical, `grim -s 1`). Give the card about 4 s after opening: its `status --json` refresh lands
+later than the old 1.5 s wait, and a stale card looks like the previous state. To retake them:
 
 1. Put the server in the state (`amd-npu load qwen3.5:4b [--exclusive --yes]`). After an
    exclusive switch, wait ~10 s for the desktop notification to clear before capturing.
