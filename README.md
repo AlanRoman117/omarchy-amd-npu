@@ -101,6 +101,13 @@ answer holds up dictation, so keep heavy API use to NPU-only sessions.
 Downloads are always a deliberate `amd-npu pull`. The card and `load` only offer models you've already
 downloaded. (FastFlowLM's server downloads any model a request names, so arbitrary names are refused.)
 
+**Embeddings.** `amd-npu pull embed-gemma:300m`, then `amd-npu embed on`, loads EmbeddingGemma 300M
+(about 0.6 GB) next to Whisper and any LLM. `POST http://127.0.0.1:52625/v1/embeddings` with
+`{"model": "embed-gemma:300m", "input": ["..."]}` returns 768-dimensional vectors (inputs up to 2,048 tokens). It shares
+the one-request-at-a-time server, so a large batch delays a dictation that lands at the same moment;
+keep batches small. `amd-npu embed off` unloads it. The setting survives `unload`, `release`/`resume`
+and plugin updates; the card shows it under Details.
+
 ## The bar card
 
 A chip icon on the right of the bar: bright when the NPU server is up, dimmed when it's stopped,
@@ -173,6 +180,7 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | `amd-npu unload` | Drop the model; Whisper only, dictation back on the NPU |
 | `amd-npu chat [model] [--think]` | Streaming terminal chat; a multi-line paste is one message (`/reset`, `/exit`, Ctrl+C stops an answer) |
 | `amd-npu bench-llm [--raw]` | Measure the loaded model's generation speed |
+| `amd-npu embed on\|off\|status` | Load or drop the embedding model (`embed-gemma:300m`) next to Whisper; `/v1/embeddings` through the proxy. If the server won't start with it, the previous settings are restored |
 | `amd-npu release` | Frees the NPU and its memory (Whisper and any LLM); dictation uses Voxtype's CPU model; stays off across reboots |
 | `amd-npu resume` | Brings Whisper back on the NPU and dictation with it |
 | `amd-npu hide-npu <command>` | Runs a program with the NPU hidden from it, e.g. a ROCm app (see below) |
