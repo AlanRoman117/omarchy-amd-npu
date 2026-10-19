@@ -109,7 +109,10 @@ clone once installed with `omarchy plugin add`). Edits here don't reach it until
 
 Card states: `card-whisper.png`, `card-share.png`, `card-exclusive.png`, `card-released.png` (qwen3.5:0.8b)
 and `card-setup.png` (the forced `install` state), retaken 2026-10-16 in Osaka Jade on the Z13 screen
-(1600x1000 logical, `grim -s 1`). Give the card about 4 s after opening: its `status --json` refresh lands
+(1600x1000 logical, `grim -s 1`); the four state shots again 2026-10-19 for 0.12.0's Embeddings row. The
+Z13 runs at 2x now: set 1.6 for the shots with `hyprctl eval 'hl.monitor({ output = "eDP-1", mode =
+"2560x1600@180", position = "320x1080", scale = 1.6 })'` and back with `scale = "auto"`. `grim -g` takes
+layout coordinates, so add the screen's position (320,1080): the right side is `-g "1320,1080 600x1000"`. Give the card about 4 s after opening: its `status --json` refresh lands
 later than the old 1.5 s wait, and a stale card looks like the previous state. To retake them:
 
 1. Put the server in the state (`amd-npu load qwen3.5:4b [--exclusive --yes]`). After an
@@ -149,6 +152,18 @@ because only NPU dictations are counted.
   standalone Quickshell file on 6.12 shows it; the running shell happened to still resolve it.
   `grep -nE '(^|[^.A-Za-z])Color\.' *.qml` must find nothing. `Style`, `Util` and `Border` aren't
   shadowed. (PR #23, 0.11.4.)
+- **The card scrolls (0.12.0).** `KeyboardPanel` caps the card at the screen's logical height under
+  the bar: 764 px on the Z13 at 2x, ~604 at 2.5x, ~464 at 3.2x, 504 on a 1080p screen at 2x. The idle
+  card is ~640 px and grows with the mic list, warnings, a loaded model or a test result, so the
+  column sits in a `Flickable` (the harness card's and Omarchy's Dropbox/Tailscale pattern): wheel,
+  touch, Up/Down/j/k via `onMoveRequested`, back to the top on open, scrollbar flashed on open when
+  it scrolls. Test scales without touching the config:
+  `hyprctl eval 'hl.monitor({ output = "eDP-1", mode = "2560x1600@180", position = "320x1080", scale = 2.5 })'`
+  (2560x1600 also divides by 3.2), then `scale = "auto"` to restore; `wtype -k Down` scrolls an open card.
+- **Embeddings switch (0.12.0):** Off / On runs `embed off|on` (busy kinds `embedOn`/`embedOff`).
+  "Wanted" = `enabled || paused`, so a paused state keeps On lit and Off drops the pause marker. On is
+  dimmed while a shared LLM is loaded and embeddings aren't wanted (the CLI would refuse); when the
+  model isn't downloaded, On opens `amd-npu pull embed-gemma:300m` in a terminal (it asks first).
 - `Dropdown` opens its own popup; inside the card that risks clipping, so the model picker is a
   button list.
 - **Don't churn files in the installed plugin folder while the shell runs.** Every change there

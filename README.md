@@ -99,16 +99,19 @@ as shown by `amd-npu models`) or `http://127.0.0.1:52625/api` (Ollama API). In s
 answer holds up dictation, so keep heavy API use to NPU-only sessions.
 
 Downloads are always a deliberate `amd-npu pull`. The card and `load` only offer models you've already
-downloaded. (FastFlowLM's server downloads any model a request names, so arbitrary names are refused.)
+downloaded; the card's Embeddings **On** opens a terminal for the embedding model's download, which asks
+first. (FastFlowLM's server downloads any model a request names, so arbitrary names are refused.)
 
 **Embeddings.** `amd-npu pull embed-gemma:300m`, then `amd-npu embed on`, loads EmbeddingGemma 300M
-(about 0.6 GB) next to Whisper, or next to an LLM that has the NPU alone. The NPU can't hold Whisper,
+(about 0.6 GB) next to Whisper, or next to an LLM that has the NPU alone. The card's **Embeddings**
+Off / On does the same. The NPU can't hold Whisper,
 embeddings and an LLM at once, so loading a model next to Whisper pauses embeddings (the card says
 so) and unloading it brings them back. `POST http://127.0.0.1:52625/v1/embeddings` with
 `{"model": "embed-gemma:300m", "input": ["..."]}` returns 768-dimensional vectors (inputs up to 2,048 tokens). It shares
 the one-request-at-a-time server, so a large batch delays a dictation that lands at the same moment;
 keep batches small. `amd-npu embed off` unloads it. The setting survives `unload`, `release`/`resume`
-and plugin updates; the card shows it under Dictation.
+and plugin updates. Apps use it to search notes or documents by meaning rather than exact words; turn
+it off when nothing uses it to free the memory.
 
 ## The bar card
 
@@ -118,7 +121,7 @@ power panels:
 
 | Whisper only | Sharing with an LLM | LLM on the NPU alone | Released |
 |:---:|:---:|:---:|:---:|
-| <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models with Share / NPU only and Load, dictation details, microphone, F9 mode and silence warning"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with qwen3.5:0.8b loaded next to Whisper: model details, memory, API address, Test LLM, Chat and Unload"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with qwen3.5:0.8b on the NPU alone: Share the NPU with dictation button, Voxtype on its CPU model"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model"> |
+| <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models with Share / NPU only and Load, dictation details, microphone, F9 mode, silence warning and the Embeddings switch"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with qwen3.5:0.8b loaded next to Whisper: model details, memory, API address, Test LLM, Chat and Unload; embeddings paused"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with qwen3.5:0.8b on the NPU alone: Share the NPU with dictation button, Voxtype on its CPU model, embeddings still paused"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model, settings that need the NPU dimmed"> |
 
 - **Header:** READY, READY + LLM, LLM ONLY, RELEASED, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
   your last dictation time.
@@ -138,6 +141,13 @@ power panels:
   that device instead of the list.
   **F9** switches between **Hold to talk** (Omarchy's push-to-talk) and **Tap to toggle** (tap once to
   start, again to stop; the recording limit and the countdown still apply).
+- **Embeddings:** Off / On loads or unloads the embedding model (see above), with a line saying what it's
+  doing. Loading a model next to Whisper pauses embeddings (On stays lit, and they come back when you
+  unload it, even after switching it to NPU only); with a shared model already loaded, On waits until
+  it's unloaded. Turning it on or off restarts the
+  NPU server, so dictation pauses for a few seconds.
+- **On smaller or scaled screens** the card scrolls (mouse wheel, touch drag, Up/Down or j/k) when it's
+  taller than the space under the bar, and a scrollbar flashes when it opens to say there's more.
 
 **Chat** opens a floating terminal with `amd-npu chat` for a quick question or a short summary:
 paste the text (newlines and all, it goes as one message) and ask. `/exit` or Ctrl+D closes the
