@@ -143,6 +143,12 @@ because only NPU dictations are counted.
 - **Keep `Widget.qml` ASCII.** Some editors and tools turn `\uXXXX` escapes into literal glyphs;
   convert them back before committing (`grep -P '[^\x00-\x7F]' Widget.qml` must find nothing). The
   chip icon is `\udb81\ude1a` (U+F061A, nf-md-chip); the buttons use BMP Font Awesome glyphs.
+- **Always `Commons.Color`, never bare `Color`** (`import qs.Commons as Commons`, as Omarchy 4.0.5's
+  own shell does). Qt 6.12 (Omarchy 4.0.5) adds a `QtQuick` `Color` type that can shadow Omarchy's
+  singleton, leaving theme colours `undefined` ("Unable to assign [undefined] to QColor"). A
+  standalone Quickshell file on 6.12 shows it; the running shell happened to still resolve it.
+  `grep -nE '(^|[^.A-Za-z])Color\.' *.qml` must find nothing. `Style`, `Util` and `Border` aren't
+  shadowed. (PR #23, 0.11.4.)
 - `Dropdown` opens its own popup; inside the card that risks clipping, so the model picker is a
   button list.
 - **Don't churn files in the installed plugin folder while the shell runs.** Every change there

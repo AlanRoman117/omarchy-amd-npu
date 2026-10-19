@@ -727,7 +727,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             text: root.setupText()
-            color: root.stuck || root.status === "foreign" ? Color.urgent : root.bar.foreground
+            color: root.stuck || root.status === "foreign" ? Commons.Color.urgent : root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
@@ -818,7 +818,7 @@ Panel {
           visible: !root.setupMode && root.info.npuHealth === "shared"
           textFormat: Text.PlainText
           text: "Also using the NPU: " + root.holdersText() + ". Two programs on the NPU can crash its driver; close it, or start it with amd-npu hide-npu."
-          color: Color.urgent
+          color: Commons.Color.urgent
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
