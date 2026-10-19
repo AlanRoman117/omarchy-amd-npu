@@ -10,7 +10,7 @@ set -euo pipefail
 # Local API calls must never go through an HTTP proxy from the environment.
 export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}" NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
 
-VERSION=0.11.3
+VERSION=0.11.4
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
