@@ -26,8 +26,12 @@ UNIT_FILE="$CONFIG_HOME/systemd/user/$UNIT"
 # Clients talk to the proxy on $PORT; FastFlowLM itself listens on 6669, which browsers refuse.
 PROXY_UNIT="amd-npu-proxy.service"
 PROXY_UNIT_FILE="$CONFIG_HOME/systemd/user/$PROXY_UNIT"
+# Holds port 52625 for this account through proxy/server restarts and while released.
+PROXY_SOCKET="amd-npu-proxy.socket"
+PROXY_SOCKET_FILE="$CONFIG_HOME/systemd/user/$PROXY_SOCKET"
 # Fixed path: the unit runs %h/.local/share/amd-npu/proxy.py (systemd has no data-home specifier).
 PROXY_DIR="$HOME/.local/share/amd-npu"
+GUARD="$PROXY_DIR/dictation-guard.py"
 LEGACY_UNIT="flm-asr.service"
 STATE_DIR="$CONFIG_HOME/amd-npu"
 SERVER_ENV="$STATE_DIR/server.env"
@@ -119,7 +123,7 @@ wait_for_server() {
   return 1
 }
 
-# Reads or edits [whisper] in Voxtype's config. Values are read with a TOML parser; edits keep
+# Reads or edits [whisper] (or the section in VOX_SECTION) in Voxtype's config. Values are read with a TOML parser; edits keep
 # every other line as it is, go to the file a symlink points at (dotfile managers keep working),
 # and land through a temp file and an atomic rename.
 #   voxtype_cfg get <key>             the value as text (empty if unset)
@@ -129,17 +133,18 @@ voxtype_cfg() {
   python3 - "$VOXTYPE_CONFIG" "$@" <<'PY'
 import json, os, re, sys, tempfile, tomllib
 path, op, args = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3:]
+SECTION = os.environ.get("VOX_SECTION") or "whisper"
 MANAGED = ("mode", "backend", "remote_endpoint", "remote_model", "remote_timeout_secs")
 text = open(path).read()
 if op in ("get", "dump"):
     try:
-        whisper = tomllib.loads(text).get("whisper", {})
+        table = tomllib.loads(text).get(SECTION, {})
     except tomllib.TOMLDecodeError:
-        whisper = {}
+        table = {}
     if op == "dump":
-        print(json.dumps({k: whisper[k] for k in MANAGED if k in whisper}))
+        print(json.dumps({k: table[k] for k in MANAGED if k in table}))
     else:
-        v = whisper.get(args[0])
+        v = table.get(args[0])
         print("" if v is None else (str(v).lower() if isinstance(v, bool) else str(v)))
     sys.exit(0)
 HEADER = re.compile(r'^\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$')
@@ -169,11 +174,11 @@ def flush():
 for line in text.splitlines():
     h = HEADER.match(line)
     if h:
-        if section == "whisper":
+        if section == SECTION:
             flush()
         section = h.group(1)
-        found = found or section == "whisper"
-    elif section == "whisper":
+        found = found or section == SECTION
+    elif section == SECTION:
         m = KEY.match(line)
         if m and m.group(1) in drop:
             continue
@@ -181,10 +186,10 @@ for line in text.splitlines():
             line = fmt(m.group(1), want[m.group(1)])
             seen.add(m.group(1))
     out.append(line)
-if section == "whisper":
+if section == SECTION:
     flush()
 if not found and want:
-    out += ["", "[whisper]"]
+    out += ["", f"[{SECTION}]"]
     flush()
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.toml.")
 with os.fdopen(fd, "w") as f:
@@ -237,6 +242,9 @@ voxtype_changes_text() {
   echo "    mode = \"remote\", remote_endpoint = \"$URL\", remote_model = \"$WHISPER\""
   [[ -n $(voxtype_cfg get backend) ]] && echo "    the old 'backend' line is removed (Voxtype 1.1 renamed it to 'mode')"
   timeout_ok "$(voxtype_cfg get remote_timeout_secs)" || echo "    remote_timeout_secs = 180 (long dictations take up to ~1 min to transcribe)"
+  echo "  [output] section: pre_recording_command runs amd-npu's dictation guard as each recording"
+  echo "    starts. It cancels the recording if another account holds port $PORT (any command you"
+  echo "    already have there runs after it)."
   echo "  Your current values are saved, and 'amd-npu disable' or 'remove' puts them back."
 }
 
@@ -292,6 +300,33 @@ voxtype_exclusive_off() {
   voxtype_use remote
   rm -f "$VOX_EXCLUSIVE"
 }
+
+# The dictation guard: Voxtype's [output] pre_recording_command runs lib/dictation-guard.py as each
+# recording starts, which cancels it unless this account holds port 52625 (HANCORE's review: the
+# port is plain HTTP, so Voxtype can't tell who answers). A pre_recording_command the user already
+# had runs after it, and comes back alone when the guard is removed.
+GUARD_RE='^python3 [^;]*dictation-guard\.py(; )?'
+guard_cmd() { printf 'python3 %q' "$GUARD"; }
+voxtype_guard_on() {
+  [[ -f $VOXTYPE_CONFIG ]] || return 0
+  local cur new; cur=$(VOX_SECTION=output voxtype_cfg get pre_recording_command)
+  [[ $cur =~ $GUARD_RE ]] && return 0
+  voxtype_backup
+  new=$(guard_cmd); [[ -n $cur ]] && new="$new; $cur"
+  VOX_SECTION=output voxtype_cfg set pre_recording_command="$new"
+  systemctl --user restart voxtype.service 2>/dev/null || true
+}
+voxtype_guard_off() {
+  [[ -f $VOXTYPE_CONFIG ]] || return 0
+  local cur rest; cur=$(VOX_SECTION=output voxtype_cfg get pre_recording_command)
+  [[ $cur =~ $GUARD_RE ]] || return 0
+  voxtype_backup
+  rest=${cur#"${BASH_REMATCH[0]}"}
+  if [[ -n $rest ]]; then VOX_SECTION=output voxtype_cfg set pre_recording_command="$rest"
+  else VOX_SECTION=output voxtype_cfg set -pre_recording_command; fi
+  systemctl --user restart voxtype.service 2>/dev/null || true
+}
+guard_installed() { [[ -f $VOXTYPE_CONFIG && $(VOX_SECTION=output voxtype_cfg get pre_recording_command) =~ $GUARD_RE ]]; }
 
 # Who listens where our clients connect: "other" if any listener that would get 127.0.0.1:<port>
 # traffic (loopback, 0.0.0.0, ::, ::1, ::ffff:127.0.0.1) belongs to another account, else "own"
@@ -377,8 +412,11 @@ not_released() {
 install_stale() {
   [[ -f $UNIT_FILE ]] || return 1
   ! cmp -s "$ROOT/lib/proxy.py" "$PROXY_DIR/proxy.py" ||
+    ! cmp -s "$ROOT/lib/dictation-guard.py" "$GUARD" ||
     ! cmp -s "$ROOT/systemd/$UNIT" "$UNIT_FILE" ||
-    ! cmp -s "$ROOT/systemd/$PROXY_UNIT" "$PROXY_UNIT_FILE"
+    ! cmp -s "$ROOT/systemd/$PROXY_UNIT" "$PROXY_UNIT_FILE" ||
+    ! cmp -s "$ROOT/systemd/$PROXY_SOCKET" "$PROXY_SOCKET_FILE" ||
+    { voxtype_on_npu && ! guard_installed; }
 }
 
 # The session's memlock ceiling is unlimited (the user service manager's hard limit).
@@ -579,12 +617,19 @@ cmd_enable() {
   [[ -z $(packages_missing) ]] || die "Packages missing (run: amd-npu install)."
 
   step "Validate the NPU stack"
-  local validation
-  # As a transient service with the service's own memlock limit; fails until the ceiling is lifted.
-  validation=$(systemd-run --user --wait --pipe --quiet -p LimitMEMLOCK=infinity flm validate 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
-  grep -q 'Memlock Limit: infinity' <<<"$validation" || die "Memlock is not unlimited yet. Reboot after 'amd-npu install'."
-  grep -q 'NPU FW Version' <<<"$validation" || { echo "$validation"; die "flm validate failed."; }
-  ok "$(grep -o 'NPU FW Version: .*' <<<"$validation")"
+  local validation fw
+  if systemctl --user is-active --quiet "$UNIT" && server_up; then
+    # A running server already proves the driver, firmware and memlock limit, and `flm validate`
+    # would open the NPU from a second process next to it (re-running enable, Apply plugin update).
+    fw=$(npu_firmware)
+    ok "NPU server already running${fw:+ (firmware $fw)}; flm validate skipped"
+  else
+    # As a transient service with the service's own memlock limit; fails until the ceiling is lifted.
+    validation=$(systemd-run --user --wait --pipe --quiet -p LimitMEMLOCK=infinity flm validate 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+    grep -q 'Memlock Limit: infinity' <<<"$validation" || die "Memlock is not unlimited yet. Reboot after 'amd-npu install'."
+    grep -q 'NPU FW Version' <<<"$validation" || { echo "$validation"; die "flm validate failed."; }
+    ok "$(grep -o 'NPU FW Version: .*' <<<"$validation")"
+  fi
 
   step "Whisper model"
   # The sandboxed server can't download (and would hang trying), so missing models are fetched
@@ -618,10 +663,20 @@ cmd_enable() {
   fi
   install_unit "$UNIT" "$UNIT_FILE"
   install_unit "$PROXY_UNIT" "$PROXY_UNIT_FILE"
+  install_unit "$PROXY_SOCKET" "$PROXY_SOCKET_FILE"
   mkdir -p "$PROXY_DIR"
   cp "$ROOT/lib/proxy.py" "$PROXY_DIR/proxy.py"
+  cp "$ROOT/lib/dictation-guard.py" "$GUARD"
   systemctl --user daemon-reload
   systemctl --user enable "$UNIT" >/dev/null 2>&1
+  if ! systemctl --user is-active --quiet "$PROXY_SOCKET"; then
+    # Before 0.12 the proxy bound the port itself; systemd holds it from now on.
+    systemctl --user stop "$PROXY_UNIT" 2>/dev/null || true
+    systemctl --user enable --now "$PROXY_SOCKET" >/dev/null 2>&1 ||
+      die "Couldn't hold $URL for this account ($(port_owner "$PORT") listener there; journalctl --user -u $PROXY_SOCKET)."
+  fi
+  systemctl --user enable "$PROXY_SOCKET" >/dev/null 2>&1
+  ok "Port $PORT held for this account ($PROXY_SOCKET)"
   restart_server
   rm -f "$RELEASED"
   ok "Running; API on $URL ($(mode)), FastFlowLM behind it on 127.0.0.1:6669"
@@ -642,10 +697,25 @@ cmd_enable() {
       voxtype_changes_text
       if confirm "Point Voxtype at the NPU?"; then
         voxtype_use remote
-        ok "Dictation now transcribes on the NPU (previous values saved)"
+        voxtype_guard_on
+        ok "Dictation now transcribes on the NPU, with the dictation guard (previous values saved)"
       else
         note "Voxtype left as it was. Run 'amd-npu enable' again to switch it."
       fi
+    fi
+    if { voxtype_on_npu || [[ -f $VOX_EXCLUSIVE ]]; } && ! guard_installed; then
+      echo "  Voxtype's config ($VOXTYPE_CONFIG), [output] section: pre_recording_command runs"
+      echo "    amd-npu's dictation guard as each recording starts, cancelling it if another account"
+      echo "    holds port $PORT. Any command you already have there runs after it; 'amd-npu disable'"
+      echo "    or 'remove' takes the guard out again."
+      if confirm "Add the dictation guard to Voxtype?"; then
+        voxtype_guard_on
+        ok "Dictation guard added (recordings stop if port $PORT isn't this account's)"
+      else
+        note "No guard: if another account takes port $PORT, it would receive your dictation."
+      fi
+    elif guard_installed; then
+      ok "Dictation guard in place"
     fi
   else
     note "Voxtype isn't set up. Run 'omarchy voxtype install', then 'amd-npu enable' again."
@@ -660,7 +730,10 @@ cmd_status_json() {
   local service=inactive server=false proxy=inactive whisper_dl=false llm="" llm_info="null" port_ok=true stale=false
   local health released=false; health=$(npu_health)
   [[ -f $RELEASED ]] && released=true
+  local guard=false held=false
   systemctl --user is-active --quiet "$PROXY_UNIT" && proxy=active
+  systemctl --user is-active --quiet "$PROXY_SOCKET" && held=true
+  guard_installed && guard=true
   [[ $(port_owner "$PORT") == other ]] && port_ok=false
   install_stale && stale=true
   systemctl --user is-active --quiet "$UNIT" && service=active
@@ -677,10 +750,10 @@ cmd_status_json() {
     --arg mode "$(mode)" --arg llm "$llm" --argjson llmInfo "$llm_info" \
     --argjson rss "$(server_rss_mb)" --argjson npuMb "$(server_npu_mb)" --argjson ctx "$(env_get FLM_CTX -1)" \
     --argjson models "$(models_json | jq -c '[.[] | select(.installed) | {name, params, footprint}]')" \
-    --argjson portOk "$port_ok" --argjson stale "$stale" \
+    --argjson portOk "$port_ok" --argjson stale "$stale" --argjson guard "$guard" --argjson portHeld "$held" \
     --arg health "$health" --argjson released "$released" --argjson embed "$(embed_status_json)" --arg f9 "$(f9_mode)" \
     '{service: $service, proxy: $proxy, server: $server, model: $model, modelName: $modelName, url: $url,
-      portOk: $portOk, stale: $stale, released: $released, f9: $f9, npuHealth: ($health | split(" ")[0]),
+      portOk: $portOk, portHeld: $portHeld, guard: $guard, stale: $stale, released: $released, f9: $f9, npuHealth: ($health | split(" ")[0]),
       npuDetail: ($health | sub("^[a-z]+ ?"; "")),
       firmware: $firmware, backend: $backend, last: $last, mode: $mode, rssMb: $rss, npuMb: $npuMb,
       llm: (if $llm == "" then null else ($llmInfo + {name: $llm, ctxSetting: $ctx}) end),
@@ -701,7 +774,9 @@ cmd_status() {
   local ready=0
   step "AMD NPU status"
   if [[ $(port_owner "$PORT") == other ]]; then
-    bad "Port $PORT is held by another account: don't dictate (it would get your audio and choose the typed text)"; ready=1
+    if guard_installed; then bad "Port $PORT is held by another account: the dictation guard cancels every recording until it's gone"
+    else bad "Port $PORT is held by another account: don't dictate (it would get your audio and choose the typed text)"; fi
+    ready=1
   fi
   install_stale && note "Plugin updated: run 'amd-npu enable' to apply the new proxy and service files"
   local health; health=$(npu_health)
@@ -712,6 +787,10 @@ cmd_status() {
   [[ -f $RELEASED ]] && note "The NPU is released (amd-npu resume brings it back)"
   if systemctl --user is-active --quiet "$UNIT"; then ok "$UNIT active"; else bad "$UNIT not running"; ready=1; fi
   if systemctl --user is-active --quiet "$PROXY_UNIT"; then ok "$PROXY_UNIT active (web pages refused)"; else bad "$PROXY_UNIT not running"; ready=1; fi
+  if systemctl --user is-active --quiet "$PROXY_SOCKET"; then ok "Port $PORT held for this account ($PROXY_SOCKET)"
+  else bad "$PROXY_SOCKET isn't holding port $PORT: run 'amd-npu enable'"; ready=1; fi
+  if guard_installed; then ok "Dictation guard in Voxtype's pre_recording_command"
+  elif voxtype_on_npu; then bad "No dictation guard in Voxtype: run 'amd-npu enable'"; ready=1; fi
   if server_up; then ok "Server answering on $URL"; else bad "Server not answering on $URL"; ready=1; fi
   if [[ -d $WHISPER_DIR ]]; then ok "Whisper model $WHISPER present"; else bad "Whisper model $WHISPER not downloaded"; ready=1; fi
   local fw; fw=$(npu_firmware)
@@ -996,9 +1075,12 @@ cmd_bench_llm() {
 cmd_disable() {
   npu_guard
   step "Disable the NPU server"
+  voxtype_guard_off
   voxtype_restore
   ok "Voxtype's own settings restored"
   systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
+  # Voxtype no longer sends audio to the port, so it can be let go.
+  systemctl --user disable --now "$PROXY_SOCKET" "$PROXY_UNIT" >/dev/null 2>&1 || true
   rm -f "$RELEASED"
   ok "$UNIT stopped; the NPU is free"
   refresh_widget
@@ -1084,7 +1166,7 @@ cmd_hide_npu() {
 cmd_remove() {
   cmd_disable
   step "Remove"
-  rm -f "$UNIT_FILE" "$PROXY_UNIT_FILE" "$UNIT_FILE".bak.* "$PROXY_UNIT_FILE".bak.*
+  rm -f "$UNIT_FILE" "$PROXY_UNIT_FILE" "$PROXY_SOCKET_FILE" "$UNIT_FILE".bak.* "$PROXY_UNIT_FILE".bak.* "$PROXY_SOCKET_FILE".bak.*
   if [[ -f $F9_TOGGLE ]]; then
     rm -f "$F9_TOGGLE"
     hyprctl reload >/dev/null 2>&1 || true

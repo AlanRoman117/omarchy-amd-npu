@@ -1,0 +1,13 @@
+[Unit]
+Description=AMD NPU API port 127.0.0.1:52625, held for this account (starts amd-npu-proxy)
+Documentation=https://github.com/AlanRoman117/omarchy-amd-npu
+# Voxtype sends dictation audio here. systemd keeps the port bound for as long as this account's
+# service manager runs, through every proxy and server restart and while the NPU is released, so
+# another account can never bind it in between. The proxy gets the socket when it starts.
+
+[Socket]
+ListenStream=127.0.0.1:52625
+Service=amd-npu-proxy.service
+
+[Install]
+WantedBy=sockets.target

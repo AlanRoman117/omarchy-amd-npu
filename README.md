@@ -59,6 +59,16 @@ Then click the dimmed chip in the bar. The card walks you through setup:
 3. **Finish setup** downloads Whisper, starts the NPU server and points Voxtype at it. It shows the
    exact Voxtype settings it will change and asks first; `amd-npu disable` puts your own back.
 
+> **What it changes in Voxtype's config** (`~/.config/voxtype/config.toml`, only after you agree):
+> - `[whisper]`: `mode = "remote"`, `remote_endpoint = "http://127.0.0.1:52625"`, `remote_model`, and
+>   `remote_timeout_secs = 180` if yours is lower. Dictation audio goes to the NPU instead of the CPU model.
+> - `[output]`: `pre_recording_command`, the **dictation guard**. As each recording starts it checks that
+>   port 52625 belongs to your account, and if it doesn't (another account on the machine took it), it
+>   cancels the recording before any audio is sent and tells you why. A `pre_recording_command` you
+>   already have keeps running after it.
+>
+> `amd-npu disable` or `remove` puts all of it back. See [What it changes on your system](#what-it-changes-on-your-system).
+
 On a machine without an XDNA2 NPU the chip stays hidden. Prefer the terminal? The same steps are
 `amd-npu install`, a reboot, then `amd-npu enable`, run from
 `~/.config/omarchy/plugins/alanroman117.amd-npu/bin/`.
@@ -74,7 +84,8 @@ start yourself.
 
 To update: `omarchy plugin update alanroman117.amd-npu`, then run `amd-npu enable` again so the
 service files and the API proxy are refreshed (a changed unit's previous version is kept as one
-backup). The card shows **Apply plugin update** when that's needed.
+backup). The card shows **Apply plugin update** when that's needed. Updating to 0.12 from an earlier
+version also asks to add the dictation guard to Voxtype (above).
 
 ## Local models
 
@@ -192,14 +203,14 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | `amd-npu pull <model>` | Download a model (asks first) |
 | `amd-npu load <model> [--exclusive] [--ctx N]` | Load next to Whisper, or alone with dictation on the CPU. `--ctx` is `-1` (model default) or 512 and up; if the server won't start, the previous settings are restored |
 | `amd-npu unload` | Drop the model; Whisper only, dictation back on the NPU |
-| `amd-npu chat [model] [--think]` | Streaming terminal chat; a multi-line paste is one message (`/reset`, `/exit`, Ctrl+C stops an answer) |
+| `amd-npu chat [model] [--think]` | Streaming terminal chat; a multi-line paste is one message (`/reset`, `/exit`, Ctrl+C stops an answer). FastFlowLM's flash models (`*-flash`) answer each message on its own |
 | `amd-npu bench-llm [--raw]` | Measure the loaded model's generation speed |
 | `amd-npu embed on\|off\|status` | Load or drop the embedding model (`embed-gemma:300m`) next to Whisper; `/v1/embeddings` through the proxy. If the server won't start with it, the previous settings are restored |
 | `amd-npu release` | Frees the NPU and its memory (Whisper and any LLM); dictation uses Voxtype's CPU model; stays off across reboots |
 | `amd-npu resume` | Brings Whisper back on the NPU and dictation with it |
 | `amd-npu hide-npu <command>` | Runs a program with the NPU hidden from it, e.g. a ROCm app (see below) |
 | `amd-npu f9 toggle` / `hold` | Tap F9 to start and tap again to stop, or back to holding it (Omarchy's default); the card's **F9** row does the same |
-| `amd-npu disable` | Puts Voxtype's own `[whisper]` settings back and stops the server (frees the NPU) |
+| `amd-npu disable` | Puts Voxtype's own `[whisper]` settings back, removes the dictation guard and stops the server (frees the NPU and port 52625) |
 | `amd-npu remove` | `disable` + delete the services; asks before deleting models, settings, old backups, packages and the memlock setting |
 
 ## What it changes on your system
@@ -208,8 +219,10 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 - **Memlock:** the NPU runtime needs unlimited locked memory. One file, naming only your account:
   `/etc/security/limits.d/90-amd-npu-memlock.conf`. (Versions before 0.8 also wrote two systemd
   drop-ins that applied to every account; `amd-npu install` and `remove` delete them.)
-- **Services:** `~/.config/systemd/user/amd-npu.service` (FastFlowLM on `127.0.0.1:6669`) and
-  `amd-npu-proxy.service` (the API on `127.0.0.1:52625`, running `~/.local/share/amd-npu/proxy.py`).
+- **Services:** `~/.config/systemd/user/amd-npu.service` (FastFlowLM on `127.0.0.1:6669`),
+  `amd-npu-proxy.service` (the API on `127.0.0.1:52625`, running `~/.local/share/amd-npu/proxy.py`) and
+  `amd-npu-proxy.socket`, which keeps port 52625 bound for your account through every restart and
+  while the NPU is released (systemd hands it to the proxy).
   Both are sandboxed: read-only system and home (FastFlowLM can't write its models folder), private
   `/tmp`, no extra privileges or capabilities, and a system-call filter; `systemd-analyze --user
   security amd-npu` rates them 1.8 ("OK"). Settings live in `~/.config/amd-npu/server.env` (which
@@ -224,6 +237,9 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   it on `enable` if your config still has it.) Your original values and the first and
   latest copies of the file are kept in `~/.config/amd-npu/voxtype/`, and `disable`/`remove` put
   the originals back. Edits are atomic and follow a symlinked config (dotfile managers keep working).
+  `[output]` gets `pre_recording_command = "python3 ~/.local/share/amd-npu/dictation-guard.py"` (the
+  dictation guard, see [Good to know](#good-to-know)); if you already had a command there, it's kept and
+  runs after the guard, and `disable`/`remove` take only the guard out.
 - **F9 mode,** only when you pick **Tap to toggle**: one file,
   `~/.local/state/omarchy/toggles/hypr/amd-npu-f9-toggle.lua`, which unbinds Omarchy's two F9
   push-to-talk bindings and binds F9 to `voxtype record toggle`. Omarchy loads that folder after your
@@ -261,22 +277,31 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 - **The API on `127.0.0.1:52625` has no password, but only your account can use it.** The proxy looks
   up who owns each incoming connection and closes other accounts' connections immediately; your own
   are capped at 32 at once. (FastFlowLM's internal port 6669 has no such check; browsers can't
-  reach it, but other local accounts can.) That's fine on a single-user laptop. On a shared machine, another account could take the
-  port while the service is stopped, and Voxtype would then send it your audio and type whatever
-  text it returns. The card shows **PORT TAKEN** and `amd-npu status` warns when the port belongs to
-  another account, and the proxy only forwards to a FastFlowLM port that belongs to you.
+  reach it, but other local accounts can.) The proxy only forwards to a FastFlowLM port that
+  belongs to you.
+- **Dictation only goes to your own account's port.** Voxtype talks plain HTTP and can't check who
+  answers on 52625, so on a shared machine another account holding that port would get your audio and
+  choose the text that gets typed. Two things stop that:
+  - **The port is never free.** `amd-npu-proxy.socket` keeps it bound for your account while your
+    session runs (from boot if lingering is on, `loginctl enable-linger`), including during server
+    restarts, plugin updates and while the NPU is released, so there's no gap to take it in.
+  - **The dictation guard** (Voxtype's `pre_recording_command`) checks the port's owner as each recording
+    starts and cancels the recording, before any audio is sent, if it isn't you: for example if another
+    account bound the port before you logged in. You get a notification, the card shows **PORT TAKEN**
+    and `amd-npu doctor` says what's wrong.
 - **Web pages can't use it.** FastFlowLM itself listens on `127.0.0.1:6669`, a port browsers refuse
   to connect to. The proxy on 52625 forwards only the API routes clients need (chat, completions,
   embeddings, transcription, model listing). It refuses requests from web pages (any origin not on
   your allowlist), plain-text tricks, unexpected `Host` headers (DNS rebinding), malformed or
-  duplicated lengths and models that aren't downloaded. It also strips FastFlowLM's "readable by any
+  duplicated lengths, models that aren't downloaded and a `backend` override (FastFlowLM 1.0.9 would
+  reload the model on whatever runtime it names). It also strips FastFlowLM's "readable by any
   site" CORS header. `amd-npu doctor` checks this. To let a browser-based chat UI in, list its
   origin in `~/.config/amd-npu/server.env`, e.g. `AMD_NPU_ALLOWED_ORIGINS=http://localhost:8080`,
   then run `systemctl --user restart amd-npu` (`*` is ignored on purpose).
 - **Requests can't download models.** `/api/pull` and FastFlowLM's other management routes aren't
   forwarded, and the server can read the models folder but not write it, so downloads only happen
   through `amd-npu pull` (or `enable` for Whisper), after asking. A program that calls FastFlowLM's
-  port directly with a missing model makes it hang instead (a FastFlowLM 1.0.4 bug); `systemctl
+  port directly with a missing model makes it hang instead (seen with FastFlowLM 1.0.4); `systemctl
   --user restart amd-npu` recovers.
 - **Where models come from:** FastFlowLM downloads them from Hugging Face (with a ModelScope
   mirror), following each repository's current files. There are no pinned versions or checksums, so

@@ -249,7 +249,9 @@ Panel {
     if (status === "reboot") return "Installed. Restart the computer to apply the locked-memory limit, then finish setup here."
     if (status === "enable") return "Last step: download Whisper, start the NPU server and point Voxtype at it (it asks before changing Voxtype's settings)."
     if (stuck) return "The NPU driver is stuck" + (info.npuDetail ? " (" + info.npuDetail + ")" : "") + ". Reboot to recover, and save your work first: shutdown may hang on the stuck process. If it sits on the logo for more than a few minutes, hold the power button. Don't turn the NPU on or off until then."
-    if (status === "foreign") return "Another account on this computer is using port 52625. Don't dictate until it's gone: it would receive your audio and choose the text that gets typed. Restarting the NPU server (Details) takes the port back once it's free."
+    if (status === "foreign") return "Another account on this computer is using port 52625, where dictation goes. " + (info.guard
+      ? "Each recording is cancelled before any audio is sent until it's gone."
+      : "Don't dictate until it's gone: it would receive your audio and choose the text that gets typed.") + " Restarting the NPU server (Details) takes the port back once it's free."
     return ""
   }
 

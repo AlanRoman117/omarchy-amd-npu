@@ -17,7 +17,9 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 | `bin/amd-npu` | Setup, dictation and model commands (`amd-npu help`) |
 | `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin). Turns readline's bracketed paste back on (Python disables it), so a multi-line paste is one message; test with a pty sending `ESC[200~...ESC[201~` |
 | `systemd/amd-npu.service` | FastFlowLM on `127.0.0.1:6669` (a browser "bad port"), `--cors 0`. Reads `%E/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`, `FLM_EMBED`); `%E` = `$XDG_CONFIG_HOME`, which FastFlowLM also uses. Sandboxed (0.8.0): `PrivateUsers`, read-only models dir, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`, `SystemCallFilter=@system-service`, empty capability set, `RestrictAddressFamilies`, `ProtectProc=invisible` and more; both units score 1.8 in `systemd-analyze --user security`. FastFlowLM writes nothing in `$HOME` at runtime. `Wants=` the proxy |
-| `lib/proxy.py` + `systemd/amd-npu-proxy.service` | The public API on `127.0.0.1:52625`. `enable` copies `proxy.py` to `~/.local/share/amd-npu/`. Default-deny: only the exact method+path pairs in `ROUTES` are forwarded (`/api/pull`, `/load`, `/api/cancel`, `/api/npu/status` are refused); non-plain targets (`%`, trailing `/`, absolute form) get 400 (Python itself collapses a leading `//`). Refuses foreign `Origin`/`Sec-Fetch-Site` (allowlist `AMD_NPU_ALLOWED_ORIGINS`, `*` ignored), bad `Host`, non-JSON bodies on JSON endpoints, models that aren't downloaded (JSON `model` and `name`; multipart must have at most one real `model` field), duplicate/negative/CL+TE lengths. Sets Content-Length itself, 60 s per whole request, 16 concurrent requests (taken after the request arrives), and only forwards to 6669 if `/proc/net/tcp` shows it owned by this UID. `PartOf=amd-npu.service` |
+| `lib/proxy.py` + `systemd/amd-npu-proxy.service` | The public API on `127.0.0.1:52625`. `enable` copies `proxy.py` to `~/.local/share/amd-npu/`. Default-deny: only the exact method+path pairs in `ROUTES` are forwarded (`/api/pull`, `/load`, `/api/cancel`, `/api/npu/status` are refused); non-plain targets (`%`, trailing `/`, absolute form) get 400 (Python itself collapses a leading `//`). Refuses foreign `Origin`/`Sec-Fetch-Site` (allowlist `AMD_NPU_ALLOWED_ORIGINS`, `*` ignored), bad `Host`, non-JSON bodies on JSON endpoints, models that aren't downloaded (JSON `model` and `name`; multipart must have at most one real `model` field), duplicate/negative/CL+TE lengths. Sets Content-Length itself, 60 s per whole request, 16 concurrent requests (taken after the request arrives), and only forwards to 6669 if `/proc/net/tcp` shows it owned by this UID. Refuses a JSON `backend` key (FastFlowLM 1.0.9). `PartOf=amd-npu.service`; since 0.12.0 it takes its listening socket from `amd-npu-proxy.socket` (fd 3) and binds itself only when started without it |
+| `systemd/amd-npu-proxy.socket` | Holds 127.0.0.1:52625 for this account (`WantedBy=sockets.target`) so the port is never free between proxy/server restarts or while released. `enable` migrates (stops the old proxy, `enable --now` the socket); `disable` lets it go |
+| `lib/dictation-guard.py` | Voxtype's `[output] pre_recording_command`, copied to `~/.local/share/amd-npu/`: cancels the recording (`voxtype record cancel`) and notifies when Voxtype is in remote mode at our URL and 52625's listener isn't this UID. Stdlib only |
 
 Modes, all driven by `server.env`: **whisper** (`FLM_LLM=` empty), **share** (LLM + `FLM_ASR=1`),
 **exclusive** (LLM + `FLM_ASR=0`, Voxtype switched to `mode = "local"`, notifications both ways).
@@ -47,15 +49,30 @@ unless told otherwise, so `unload`, `resume` and `enable` don't drop it.
 - Next up: the open items in `to-do.md` (test on another XDNA2 machine, a clean-install test, the
   Omarchy Discussions pitch).
 
-## FastFlowLM behaviour this relies on (1.0.4, read from `src/server/rest_handler.cpp`)
+## FastFlowLM behaviour this relies on (1.0.4, re-read for 1.0.9 on 2026-10-19 in `src/server/`)
+
+Omarchy's 2026-10-19 update moved FastFlowLM 1.0.4 -> 1.0.9 without anyone noticing; check
+`pacman -Q fastflowlm` after OS updates and diff `src/server/rest_handler.cpp`/`server.cpp`
+(`gh api repos/ROCm/FastFlowLM/contents/src/server/<file>?ref=vX -H 'Accept: application/vnd.github.raw'`).
+
 
 - One model per type (ASR, LLM, embedding) loaded at once; types coexist, so Whisper stays while
   LLMs swap.
 - A request naming another LLM swaps it live (`ensure_model_loaded`), and **auto-downloads it if
   missing**. Never send a model name that isn't downloaded (`require_downloaded_llm`).
-- A failed LLM load resets the NPU device, which can take Whisper with it. `load` pings Whisper
-  afterwards and restarts the service if needed.
-- **The server runs one request at a time.** In share mode, dictation queues behind a running LLM
+- A failed LLM load reset the NPU device in 1.0.4, which could take Whisper with it; 1.0.9 leaves the
+  shared device alone and only drops the failed engine. `load` still pings Whisper afterwards and
+  restarts the service if needed.
+- 1.0.9: an unknown model name is refused (no substitute model), but a catalog model that isn't
+  downloaded is **still pulled** on request, so the proxy's downloaded-only check stays.
+- 1.0.9: a request's `"backend"` field reloads the model on that runtime (and "on aie_next could end
+  the process"); the proxy refuses any JSON body with a `backend` key.
+- 1.0.9: errors come back as `{"error": {"message", "type": "model_error", "code", ...}}`, some with
+  HTTP 500 instead of 200. `warm_llm` checks `.choices`, so either shape counts as a failure.
+- 1.0.6+: flash models (`*-flash:*`) are single-turn (any assistant message is refused, 1k context);
+  `lib/chat.py` sends them one message at a time.
+- **The server runs one request at a time** (1.0.9 moved the queue into an `NPURequestCoordinator`,
+  same behaviour). In share mode, dictation queues behind a running LLM
   answer (measured: a 2 s clip waited 44 s). `--preemption 1` does not change this.
 - No unload endpoint: unloading restarts the server Whisper-only.
 - **With Whisper off, `/v1/audio/transcriptions` answers HTTP 200 with a body of `null`.** Check
@@ -146,6 +163,23 @@ because only NPU dictations are counted.
 - **Keep `Widget.qml` ASCII.** Some editors and tools turn `\uXXXX` escapes into literal glyphs;
   convert them back before committing (`grep -P '[^\x00-\x7F]' Widget.qml` must find nothing). The
   chip icon is `\udb81\ude1a` (U+F061A, nf-md-chip); the buttons use BMP Font Awesome glyphs.
+- **Port 52625 and the dictation guard (0.12.0, HANCORE's Medium on ab6f2c1).** Voxtype (1.1.1: plain
+  `http://`/`https://` via ureq, public CAs, no Unix sockets) can't authenticate the server, and the
+  proxy unit was `PartOf=amd-npu.service`, so the port was free on every server restart and while
+  released. Now `amd-npu-proxy.socket` (user unit, `WantedBy=sockets.target`) holds 127.0.0.1:52625
+  and hands fd 3 to the proxy (`systemd_socket()` in proxy.py); restarting or stopping the proxy never
+  frees the port (tested: 560 samples at 20 ms across restart + stop, all "own"). Never restart the
+  socket itself on an update: that's the gap. `lib/dictation-guard.py` (installed to
+  `~/.local/share/amd-npu/`) is Voxtype's `[output] pre_recording_command`: Voxtype awaits hooks but
+  only logs their failure, so the guard runs `voxtype record cancel` itself when the listener isn't
+  this uid ("none" counts too: nothing stops another account binding it next). It does nothing unless
+  Voxtype is in remote mode at our URL. `voxtype_guard_on/off` prepend/strip
+  `python3 <path>/dictation-guard.py; ` so a user's own hook survives. Test the cancel path by
+  stopping the socket (`systemctl --user stop amd-npu-proxy.socket amd-npu-proxy.service`), then
+  `voxtype record start`: the log shows "pre_recording hook failed ... port 52625 is none" and the
+  state is idle at once. Restart the socket after.
+- **`enable` doesn't run `flm validate` while the server is up** (it opens the NPU from a second
+  process). The running server proves driver, firmware and memlock; firmware comes from `xrt-smi`.
 - **Always `Commons.Color`, never bare `Color`** (`import qs.Commons as Commons`, as Omarchy 4.0.5's
   own shell does). Qt 6.12 (Omarchy 4.0.5) adds a `QtQuick` `Color` type that can shadow Omarchy's
   singleton, leaving theme colours `undefined` ("Unable to assign [undefined] to QColor"). A
