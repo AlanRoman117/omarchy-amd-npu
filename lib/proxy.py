@@ -293,6 +293,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return 400, "body is not a JSON object"
             if any(not isinstance(m, str) for m in models):
                 return 400, "model must be a string"
+            # FastFlowLM 1.0.9 reloads the model on whatever runtime a request's "backend" names.
+            if "backend" in data:
+                return 400, "backend can't be chosen through amd-npu"
         elif path in MULTIPART_ENDPOINTS:
             if not content_type.startswith("multipart/form-data"):
                 return 415, "transcription needs multipart/form-data"
@@ -428,11 +431,32 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
             CONNECTIONS.release()
 
 
+def systemd_socket():
+    """The listening socket amd-npu-proxy.socket hands over. systemd holds the port for this account
+    from login (from boot with lingering) through every proxy and server restart, so another account
+    can't take it in between and receive dictation audio. None when started without it."""
+    if os.environ.get("LISTEN_PID") != str(os.getpid()) or os.environ.get("LISTEN_FDS") != "1":
+        return None
+    for key in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):
+        os.environ.pop(key, None)
+    sock = socket.socket(fileno=3)
+    if sock.getsockname()[:2] != (LISTEN_HOST, LISTEN_PORT):
+        sys.exit(f"amd-npu-proxy.socket listens on {sock.getsockname()[:2]}, expected {LISTEN_HOST}:{LISTEN_PORT}")
+    return sock
+
+
 def main():
-    server = Server((LISTEN_HOST, LISTEN_PORT), Handler)
+    inherited = systemd_socket()
+    if inherited is None:
+        server = Server((LISTEN_HOST, LISTEN_PORT), Handler)
+    else:
+        server = Server((LISTEN_HOST, LISTEN_PORT), Handler, bind_and_activate=False)
+        server.socket.close()
+        server.socket = inherited
+        server.server_name, server.server_port = LISTEN_HOST, LISTEN_PORT
     if "*" in _ORIGINS:
         sys.stderr.write("AMD_NPU_ALLOWED_ORIGINS: '*' ignored (it would let every website use the API)\n")
-    sys.stderr.write(f"amd-npu proxy on {LISTEN_HOST}:{LISTEN_PORT} -> {UPSTREAM_HOST}:{UPSTREAM_PORT}; "
+    sys.stderr.write(f"amd-npu proxy on {LISTEN_HOST}:{LISTEN_PORT}{' (port held by systemd)' if inherited else ''} -> {UPSTREAM_HOST}:{UPSTREAM_PORT}; "
                      f"allowed origins: {' '.join(sorted(ALLOWED_ORIGINS)) or 'none'}\n")
     server.serve_forever()
 

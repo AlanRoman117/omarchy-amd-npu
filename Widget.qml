@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as Controls
 import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
@@ -232,6 +233,8 @@ Panel {
     if (busy === "load") return "LOADING MODEL..."
     if (busy === "unload") return "UNLOADING..."
     if (busy === "share" || busy === "switch") return "SWITCHING..."
+    if (busy === "embedOn") return "LOADING EMBEDDINGS..."
+    if (busy === "embedOff") return "UNLOADING EMBEDDINGS..."
     if (released) return "RELEASED"
     if (status !== "ready") return "STOPPED"
     if (exclusive) return "LLM ONLY"
@@ -246,18 +249,39 @@ Panel {
     if (status === "reboot") return "Installed. Restart the computer to apply the locked-memory limit, then finish setup here."
     if (status === "enable") return "Last step: download Whisper, start the NPU server and point Voxtype at it (it asks before changing Voxtype's settings)."
     if (stuck) return "The NPU driver is stuck" + (info.npuDetail ? " (" + info.npuDetail + ")" : "") + ". Reboot to recover, and save your work first: shutdown may hang on the stuck process. If it sits on the logo for more than a few minutes, hold the power button. Don't turn the NPU on or off until then."
-    if (status === "foreign") return "Another account on this computer is using port 52625. Don't dictate until it's gone: it would receive your audio and choose the text that gets typed. Restarting the NPU server (Details) takes the port back once it's free."
+    if (status === "foreign") return "Another account on this computer is using port 52625, where dictation goes. " + (info.guard
+      ? "Each recording is cancelled before any audio is sent until it's gone."
+      : "Don't dictate until it's gone: it would receive your audio and choose the text that gets typed.") + " Restarting the NPU server (Details) takes the port back once it's free."
     return ""
   }
 
 
+  // The Embeddings switch: On loads the embedding model next to Whisper, or next to an LLM that has
+  // the NPU alone. Whisper, embeddings and a shared LLM don't all fit, so while one shares the NPU
+  // embeddings are paused (still wanted, back on unload) or On waits until it's unloaded.
+  readonly property var embed: info.embed || ({})
+  readonly property string embedName: embed.name || "embed-gemma:300m"
+  readonly property bool embedWanted: !!embed.enabled || !!embed.paused
+  readonly property bool embedBlocked: !!llm && !exclusive && !embedWanted
+  readonly property bool embedCanSwitch: status === "ready" && busy === ""
+
+  function setEmbed(on) {
+    if (!embedCanSwitch || embedWanted === on) return
+    if (on && embedBlocked) return
+    // The download asks first and shows progress, so it runs in a terminal.
+    if (on && !embed.installed) { openSetup("pull " + quote(embedName)); return }
+    runAction(on ? "embedOn" : "embedOff", ["embed", on ? "on" : "off"])
+  }
+
   function embedText() {
-    var e = info.embed || null
-    if (!e) return "off"
-    if (e.enabled) return "on (" + e.name + ")"
-    if (e.paused) return "paused while the LLM shares the NPU"
-    if (e.installed) return "off (amd-npu embed on)"
-    return "off (not downloaded)"
+    if (busy === "embedOn") return "Loading " + embedName + " next to Whisper..."
+    if (busy === "embedOff") return "Unloading " + embedName + "..."
+    if (status !== "ready") return "Turn the NPU on to change this."
+    if (embed.paused) return "Paused while " + (llm ? llm.name : "the model") + " is loaded; back when you unload it."
+    if (embedBlocked) return "Unload " + (llm ? llm.name : "the model") + " first: Whisper, embeddings and a model don't all fit."
+    if (embed.enabled) return embedName + " answers apps that search by meaning (/v1/embeddings)."
+    if (!embed.installed) return "On downloads " + embedName + " first (~0.6 GB; it asks)."
+    return "Loads " + embedName + " (~0.6 GB) for apps that search by meaning."
   }
 
   function backendText() {
@@ -387,7 +411,28 @@ Panel {
       actionError = ""
       confirming = false
       refresh()
+      flick.contentY = 0
+      // Nothing else hints that a card taller than the screen has more below, so show the
+      // scrollbar for a moment once it's laid out.
+      Qt.callLater(function() { if (flick.interactive) { vbar.active = true; barFlash.restart() } })
     }
+  }
+
+  // Up / Down (and j / k) in the card: a step of about two rows, kept inside the content.
+  function scrollCard(dy) {
+    if (!flick.interactive) return
+    var maxY = Math.max(0, flick.contentHeight - flick.height)
+    flick.contentY = Math.max(0, Math.min(maxY, flick.contentY + dy * Style.space(48)))
+    // Setting contentY doesn't move the Flickable, so show the scrollbar for a moment the way a
+    // wheel scroll does.
+    vbar.active = true
+    barFlash.restart()
+  }
+
+  Timer {
+    id: barFlash
+    interval: 700
+    onTriggered: vbar.active = flick.moving || vbar.pressed || vbar.hovered
   }
 
   onDownloadedChanged: {
@@ -631,602 +676,657 @@ Panel {
       anchors.fill: parent
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      // Up / Down (and j / k) scroll the card when it's taller than the screen.
+      onMoveRequested: function(dx, dy) { root.scrollCard(dy) }
 
-      Column {
-        id: column
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
-        spacing: Style.space(14)
-
-        // ---------- Hero: chip, title/status, last dictation time ----------
-        Item {
-          width: parent.width
-          implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroValue.implicitHeight)
-
-          Text {
-            id: heroIcon
-            textFormat: Text.PlainText
-            text: "\udb81\ude1a"
-            color: root.bar.foreground
-            opacity: root.status === "ready" ? 1 : 0.45
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.display
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Column {
-            id: heroLabels
-            anchors.left: heroIcon.right
-            anchors.leftMargin: Style.space(14)
-            anchors.right: heroValue.left
-            anchors.rightMargin: Style.space(10)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(2)
-
-            Text {
-              text: "AMD NPU"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.title
-              font.bold: true
-              elide: Text.ElideRight
-              width: parent.width
-            }
-
-            Text {
-              textFormat: Text.PlainText
-              text: root.statusCaption()
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              font.letterSpacing: 1.2
-              elide: Text.ElideRight
-              width: parent.width
-            }
-          }
-
-          Column {
-            id: heroValue
-            visible: !root.setupMode
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 0
-
-            Text {
-              anchors.right: parent.right
-              textFormat: Text.PlainText
-              text: root.info.last ? root.info.last.replace("s", " s") : "-"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.title
-              font.bold: true
-            }
-
-            Text {
-              anchors.right: parent.right
-              text: "LAST DICTATION"
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              font.letterSpacing: 1.2
-            }
-          }
+      // The shell caps the card at the screen's height under the bar. Above 1x scale (or with the
+      // mic list, a warning or a test result showing) the content can be taller, so it scrolls
+      // instead of running off the screen.
+      Flickable {
+        id: flick
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        Controls.ScrollBar.vertical: Controls.ScrollBar {
+          id: vbar
+          policy: Controls.ScrollBar.AsNeeded
         }
 
-        PanelSeparator { foreground: root.bar.foreground }
-
-        // ---------- Setup (before amd-npu.service exists) ----------
         Column {
-          visible: root.setupMode
-          width: parent.width
-          spacing: Style.space(10)
+          id: column
+          width: flick.width
+          spacing: Style.space(14)
 
+          // ---------- Hero: chip, title/status, last dictation time ----------
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroValue.implicitHeight)
+
+            Text {
+              id: heroIcon
+              textFormat: Text.PlainText
+              text: "\udb81\ude1a"
+              color: root.bar.foreground
+              opacity: root.status === "ready" ? 1 : 0.45
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.display
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Column {
+              id: heroLabels
+              anchors.left: heroIcon.right
+              anchors.leftMargin: Style.space(14)
+              anchors.right: heroValue.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(2)
+
+              Text {
+                text: "AMD NPU"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+                elide: Text.ElideRight
+                width: parent.width
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                text: root.statusCaption()
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.2
+                elide: Text.ElideRight
+                width: parent.width
+              }
+            }
+
+            Column {
+              id: heroValue
+              visible: !root.setupMode
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 0
+
+              Text {
+                anchors.right: parent.right
+                textFormat: Text.PlainText
+                text: root.info.last ? root.info.last.replace("s", " s") : "-"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
+
+              Text {
+                anchors.right: parent.right
+                text: "LAST DICTATION"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.letterSpacing: 1.2
+              }
+            }
+          }
+
+          PanelSeparator { foreground: root.bar.foreground }
+
+          // ---------- Setup (before amd-npu.service exists) ----------
+          Column {
+            visible: root.setupMode
+            width: parent.width
+            spacing: Style.space(10)
+
+            Text {
+              textFormat: Text.PlainText
+              text: root.setupText()
+              color: root.stuck || root.status === "foreign" ? Commons.Color.urgent : root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+              width: parent.width
+            }
+
+            Row {
+              id: setupRow
+              visible: root.status !== "reboot"
+              readonly property string primary: root.status === "install" ? "install" : (root.status === "enable" ? "enable" : (root.status === "foreign" || root.stuck ? "status" : "check"))
+              width: parent.width
+              spacing: Style.space(6)
+              readonly property real cellWidth: (width - spacing) / 2
+
+              Button {
+                width: setupRow.cellWidth
+                iconText: root.status === "driver" || root.status === "foreign" || root.stuck ? "\uf120" : "\uf019"
+                text: root.status === "install" && !root.stuck ? "Set up" : (root.status === "enable" && !root.stuck ? "Finish setup" : "Details")
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                onClicked: root.openSetup(setupRow.primary)
+              }
+
+              Button {
+                width: setupRow.cellWidth
+                iconText: "\uf120"
+                text: "Check"
+                visible: root.status !== "driver" && root.status !== "foreign" && !root.stuck
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                onClicked: root.openSetup("check")
+              }
+            }
+          }
+
+          // ---------- Dictation on/off ----------
+          Item {
+            visible: !root.setupMode
+            width: parent.width
+            implicitHeight: Math.max(toggleLabels.implicitHeight, npuSwitch.implicitHeight)
+
+            Column {
+              id: toggleLabels
+              anchors.left: parent.left
+              anchors.right: npuSwitch.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(2)
+
+              Text {
+                text: "NPU"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.body
+                width: parent.width
+                elide: Text.ElideRight
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                text: root.npuSubtitle()
+                color: root.actionError !== "" ? Commons.Color.urgent : root.bar.foreground
+                opacity: root.actionError !== "" ? 1 : 0.6
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                width: parent.width
+                wrapMode: Text.WordWrap
+              }
+            }
+
+            ToggleSwitch {
+              id: npuSwitch
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              checked: root.status === "ready"
+              busy: root.busy === "switch" || root.busy === "share"
+              foreground: root.bar.foreground
+              onToggled: root.toggleNpu()
+            }
+          }
+
+          // Another program has the NPU open: the situation that can crash the driver.
           Text {
+            visible: !root.setupMode && root.info.npuHealth === "shared"
             textFormat: Text.PlainText
-            text: root.setupText()
-            color: root.stuck || root.status === "foreign" ? Commons.Color.urgent : root.bar.foreground
+            text: "Also using the NPU: " + root.holdersText() + ". Two programs on the NPU can crash its driver; close it, or start it with amd-npu hide-npu."
+            color: Commons.Color.urgent
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
             width: parent.width
           }
 
-          Row {
-            id: setupRow
-            visible: root.status !== "reboot"
-            readonly property string primary: root.status === "install" ? "install" : (root.status === "enable" ? "enable" : (root.status === "foreign" || root.stuck ? "status" : "check"))
-            width: parent.width
-            spacing: Style.space(6)
-            readonly property real cellWidth: (width - spacing) / 2
+          PanelSeparator { visible: !root.setupMode; foreground: root.bar.foreground }
 
-            Button {
-              width: setupRow.cellWidth
-              iconText: root.status === "driver" || root.status === "foreign" || root.stuck ? "\uf120" : "\uf019"
-              text: root.status === "install" && !root.stuck ? "Set up" : (root.status === "enable" && !root.stuck ? "Finish setup" : "Details")
-              fontSize: Style.font.bodySmall
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              bordered: true
-              onClicked: root.openSetup(setupRow.primary)
-            }
-
-            Button {
-              width: setupRow.cellWidth
-              iconText: "\uf120"
-              text: "Check"
-              visible: root.status !== "driver" && root.status !== "foreign" && !root.stuck
-              fontSize: Style.font.bodySmall
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              bordered: true
-              onClicked: root.openSetup("check")
-            }
-          }
-        }
-
-        // ---------- Dictation on/off ----------
-        Item {
-          visible: !root.setupMode
-          width: parent.width
-          implicitHeight: Math.max(toggleLabels.implicitHeight, npuSwitch.implicitHeight)
-
+          // ---------- Local model ----------
           Column {
-            id: toggleLabels
-            anchors.left: parent.left
-            anchors.right: npuSwitch.left
-            anchors.rightMargin: Style.space(10)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(2)
+            visible: !root.setupMode
+            width: parent.width
+            spacing: Style.space(8)
 
-            Text {
-              text: "NPU"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.body
-              width: parent.width
-              elide: Text.ElideRight
+            PanelSectionHeader {
+              text: "LOCAL MODEL"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
             }
 
+            // Loaded: details and actions
+            Column {
+              visible: !!root.llm
+              width: parent.width
+              spacing: Style.space(8)
+
+              InfoPair { label: "Model"; value: root.llm ? root.llm.name : "" }
+              InfoPair { label: "Size"; value: root.llm ? root.llm.params + " " + root.llm.quant : "" }
+              InfoPair { label: "Mode"; value: root.exclusive ? "NPU only (dictation on CPU)" : "Shared with Whisper" }
+              InfoPair { label: "Memory"; value: root.gb(root.info.npuMb) + " NPU + " + root.gb(root.info.rssMb) }
+              InfoPair { label: "API"; value: "127.0.0.1:52625/v1" }
+
+              // NPU-only: bring dictation back next to the model (the switch used to do this).
+              Button {
+                visible: root.exclusive
+                width: parent.width
+                iconText: "\uf130"
+                text: root.busy === "share" ? "Switching..." : "Share the NPU with dictation"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                onClicked: root.runAction("share", ["load", root.llm.name, "--share"])
+              }
+
+              Row {
+                id: llmActions
+                width: parent.width
+                spacing: Style.space(6)
+                readonly property real cellWidth: (width - 2 * spacing) / 3
+
+                Button {
+                  width: llmActions.cellWidth
+                  iconText: "\uf04b"
+                  text: root.testingLlm ? "Testing..." : "Test LLM"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  onClicked: root.testLlm()
+                }
+
+                Button {
+                  width: llmActions.cellWidth
+                  iconText: "\uf086"
+                  text: "Chat"
+                  tooltipText: "Chat with the model in a terminal"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  onClicked: root.openChat()
+                }
+
+                Button {
+                  width: llmActions.cellWidth
+                  iconText: "\uf00d"
+                  text: root.busy === "unload" ? "Unloading..." : "Unload"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  onClicked: root.runAction("unload", ["unload"])
+                }
+              }
+
+              Text {
+                visible: root.llmTest !== ""
+                textFormat: Text.PlainText
+                text: root.llmTest
+                color: root.bar.foreground
+                opacity: 0.8
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+              }
+            }
+
+            // Released: nothing runs on the NPU
             Text {
+              visible: root.released
               textFormat: Text.PlainText
-              text: root.npuSubtitle()
-              color: root.actionError !== "" ? Commons.Color.urgent : root.bar.foreground
-              opacity: root.actionError !== "" ? 1 : 0.6
+              text: "Turn the NPU on to load a model."
+              color: root.bar.foreground
+              opacity: 0.6
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
               width: parent.width
               wrapMode: Text.WordWrap
             }
+
+            // Not loaded, nothing downloaded
+            Text {
+              visible: !root.llm && !root.released && root.downloaded.length === 0
+              textFormat: Text.PlainText
+              text: "No models downloaded yet. In a terminal: amd-npu models, then amd-npu pull qwen3.5:4b"
+              color: root.bar.foreground
+              opacity: 0.6
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              width: parent.width
+              wrapMode: Text.WordWrap
+            }
+
+            // Not loaded: pick a downloaded model, a mode, then load
+            Column {
+              visible: !root.llm && !root.released && root.downloaded.length > 0
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.downloaded
+                Button {
+                  required property var modelData
+                  width: parent.width
+                  leftAlign: true
+                  text: modelData.name + "   " + modelData.params + ", ~" + modelData.footprint + " GB"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  active: root.selectedModel === modelData.name
+                  onClicked: {
+                    root.selectedModel = modelData.name
+                    root.confirming = false
+                  }
+                }
+              }
+
+              Row {
+                id: modeRow
+                width: parent.width
+                spacing: Style.space(6)
+                readonly property real cellWidth: (width - spacing) / 2
+
+                Button {
+                  width: modeRow.cellWidth
+                  text: "Share with Whisper"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  active: !root.loadExclusive
+                  onClicked: { root.loadExclusive = false; root.confirming = false }
+                }
+
+                Button {
+                  width: modeRow.cellWidth
+                  text: "NPU only"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  active: root.loadExclusive
+                  onClicked: { root.loadExclusive = true; root.confirming = false }
+                }
+              }
+
+              Text {
+                visible: root.confirming
+                textFormat: Text.PlainText
+                text: "Dictation will use the CPU model (lower accuracy) until you unload " + root.selectedModel + "."
+                color: Commons.Color.urgent
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                width: parent.width
+                wrapMode: Text.WordWrap
+              }
+
+              Row {
+                id: loadRow
+                width: parent.width
+                spacing: Style.space(6)
+                readonly property real cellWidth: (width - spacing) / 2
+
+                Button {
+                  visible: root.confirming
+                  width: loadRow.cellWidth
+                  text: "Cancel"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  onClicked: root.confirming = false
+                }
+
+                Button {
+                  width: root.confirming ? loadRow.cellWidth : loadRow.width
+                  iconText: "\uf019"
+                  text: root.busy === "load" ? "Loading..." : (root.confirming ? "Load anyway" : "Load " + root.selectedModel)
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  onClicked: root.requestLoad()
+                }
+              }
+            }
           }
 
-          ToggleSwitch {
-            id: npuSwitch
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            checked: root.status === "ready"
-            busy: root.busy === "switch" || root.busy === "share"
-            foreground: root.bar.foreground
-            onToggled: root.toggleNpu()
-          }
-        }
+          PanelSeparator { visible: !root.setupMode; foreground: root.bar.foreground }
 
-        // Another program has the NPU open: the situation that can crash the driver.
-        Text {
-          visible: !root.setupMode && root.info.npuHealth === "shared"
-          textFormat: Text.PlainText
-          text: "Also using the NPU: " + root.holdersText() + ". Two programs on the NPU can crash its driver; close it, or start it with amd-npu hide-npu."
-          color: Commons.Color.urgent
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-          width: parent.width
-        }
-
-        PanelSeparator { visible: !root.setupMode; foreground: root.bar.foreground }
-
-        // ---------- Local model ----------
-        Column {
-          visible: !root.setupMode
-          width: parent.width
-          spacing: Style.space(8)
-
-          PanelSectionHeader {
-            text: "LOCAL MODEL"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-          }
-
-          // Loaded: details and actions
+          // ---------- Details ----------
           Column {
-            visible: !!root.llm
+            visible: !root.setupMode
             width: parent.width
             spacing: Style.space(8)
 
-            InfoPair { label: "Model"; value: root.llm ? root.llm.name : "" }
-            InfoPair { label: "Size"; value: root.llm ? root.llm.params + " " + root.llm.quant : "" }
-            InfoPair { label: "Mode"; value: root.exclusive ? "NPU only (dictation on CPU)" : "Shared with Whisper" }
-            InfoPair { label: "Memory"; value: root.gb(root.info.npuMb) + " NPU + " + root.gb(root.info.rssMb) }
-            InfoPair { label: "API"; value: "127.0.0.1:52625/v1" }
+            PanelSectionHeader {
+              text: "DICTATION"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
 
-            // NPU-only: bring dictation back next to the model (the switch used to do this).
-            Button {
-              visible: root.exclusive
+            InfoPair { label: "Whisper"; value: (root.info.modelName || "whisper-v3:turbo") + (root.info.model === false ? " (not downloaded)" : "") }
+            InfoPair { label: "NPU firmware"; value: root.info.firmware || "-" }
+            InfoPair { label: "Voxtype uses"; value: root.backendText() }
+
+            Row {
+              id: micRow
               width: parent.width
-              iconText: "\uf130"
-              text: root.busy === "share" ? "Switching..." : "Share the NPU with dictation"
+              spacing: Style.space(8)
+
+              InfoLabel { id: micLabelText; text: "Microphone" }
+              Item { width: Math.max(0, micRow.width - micLabelText.implicitWidth - micValue.width - micRow.spacing * 2); height: 1 }
+              InfoValue {
+                id: micValue
+                width: Math.min(implicitWidth, micRow.width - micLabelText.implicitWidth - micRow.spacing * 2)
+                elide: Text.ElideRight
+                text: (root.micName || "none") + (root.micLocked ? " (Voxtype config)" : (root.micMuted ? " (muted)" : ""))
+                color: root.micMuted || !root.micName ? Commons.Color.urgent : root.bar.foreground
+              }
+            }
+
+            // Pick the input (changes the system default, like Omarchy's audio panel)
+            Column {
+              visible: !root.micLocked && root.micInputs.length > 1
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.micInputs
+                Button {
+                  required property var modelData
+                  width: parent.width
+                  leftAlign: true
+                  text: root.micLabel(modelData)
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  active: !!root.micSource && modelData.id === root.micSource.id
+                  onClicked: root.setMic(modelData)
+                }
+              }
+
+              InfoLabel {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "Sets the system's default input for all apps, as Omarchy's audio panel does."
+              }
+            }
+
+            // F9: hold to talk (Omarchy's default) or tap to start / tap to stop (amd-npu f9)
+            Row {
+              id: f9Row
+              width: parent.width
+              spacing: Style.space(6)
+              readonly property real labelWidth: silenceLabel.implicitWidth + Style.space(4)
+              readonly property real cellWidth: (width - labelWidth - spacing * 2) / 2
+
+              InfoLabel {
+                width: f9Row.labelWidth
+                anchors.verticalCenter: parent.verticalCenter
+                text: "F9"
+              }
+
+              Repeater {
+                model: [{ mode: "hold", label: "Hold to talk" }, { mode: "toggle", label: "Tap to toggle" }]
+                Button {
+                  required property var modelData
+                  width: f9Row.cellWidth
+                  text: modelData.label
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  active: (root.info.f9 || "hold") === modelData.mode
+                  onClicked: if (!active) root.runAction("f9", ["f9", modelData.mode])
+                }
+              }
+            }
+
+            // When the countdown says a mic isn't hearing anything
+            Row {
+              id: silenceRow
+              visible: !root.micLocked
+              width: parent.width
+              spacing: Style.space(6)
+              readonly property real labelWidth: silenceLabel.implicitWidth + Style.space(4)
+              readonly property real cellWidth: (width - labelWidth - spacing * 4) / 4
+
+              InfoLabel {
+                id: silenceLabel
+                width: silenceRow.labelWidth
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Warn on silence"
+              }
+
+              Repeater {
+                model: [0, 3, 5, 10]
+                Button {
+                  required property var modelData
+                  width: silenceRow.cellWidth
+                  text: modelData === 0 ? "Off" : modelData + " s"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  active: root.silenceWarnSec === modelData
+                  onClicked: root.setSilenceWarn(modelData)
+                }
+              }
+            }
+
+            // Embeddings on the NPU (amd-npu embed on|off), for apps that search by meaning
+            Row {
+              id: embedRow
+              width: parent.width
+              spacing: Style.space(6)
+              readonly property real labelWidth: silenceLabel.implicitWidth + Style.space(4)
+              readonly property real cellWidth: (width - labelWidth - spacing * 2) / 2
+
+              InfoLabel {
+                width: embedRow.labelWidth
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Embeddings"
+              }
+
+              Repeater {
+                model: [false, true]
+                Button {
+                  required property var modelData
+                  readonly property bool usable: root.embedCanSwitch && !(modelData && root.embedBlocked)
+                  width: embedRow.cellWidth
+                  text: modelData ? "On" : "Off"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  opacity: usable || active ? 1 : 0.45
+                  active: root.embedWanted === modelData
+                  onClicked: if (usable && !active) root.setEmbed(modelData)
+                }
+              }
+            }
+
+            InfoLabel {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: root.embedText()
+            }
+          }
+
+          // ---------- Actions ----------
+          Column {
+            visible: !root.setupMode
+            width: parent.width
+            spacing: Style.space(8)
+
+            // The plugin was updated but the running proxy/service files are older: enable applies them.
+            Button {
+              visible: !!root.info.stale
+              width: parent.width
+              iconText: "\uf019"
+              text: "Apply plugin update"
+              tooltipText: "Installs the updated proxy and service files (amd-npu enable)"
               fontSize: Style.font.bodySmall
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               bordered: true
-              onClicked: root.runAction("share", ["load", root.llm.name, "--share"])
+              onClicked: root.openSetup("enable")
             }
 
             Row {
-              id: llmActions
+              id: actionRow
               width: parent.width
               spacing: Style.space(6)
-              readonly property real cellWidth: (width - 2 * spacing) / 3
+              readonly property real cellWidth: (width - spacing) / 2
 
               Button {
-                width: llmActions.cellWidth
-                iconText: "\uf04b"
-                text: root.testingLlm ? "Testing..." : "Test LLM"
+                width: actionRow.cellWidth
+                iconText: "\uf130"
+                text: root.testingNpu ? "Testing..." : "Test dictation"
+                visible: !root.released
                 fontSize: Style.font.bodySmall
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 bordered: true
-                onClicked: root.testLlm()
+                onClicked: root.testNpu()
               }
 
               Button {
-                width: llmActions.cellWidth
-                iconText: "\uf086"
-                text: "Chat"
-                tooltipText: "Chat with the model in a terminal"
+                width: root.released ? actionRow.width : actionRow.cellWidth
+                iconText: "\uf120"
+                text: "Full status"
                 fontSize: Style.font.bodySmall
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 bordered: true
-                onClicked: root.openChat()
-              }
-
-              Button {
-                width: llmActions.cellWidth
-                iconText: "\uf00d"
-                text: root.busy === "unload" ? "Unloading..." : "Unload"
-                fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                bordered: true
-                onClicked: root.runAction("unload", ["unload"])
+                onClicked: root.openFullStatus()
               }
             }
 
             Text {
-              visible: root.llmTest !== ""
+              visible: root.npuTest !== ""
               textFormat: Text.PlainText
-              text: root.llmTest
-              color: root.bar.foreground
+              text: root.npuTest
+              color: root.npuTest.indexOf("OK") >= 0 ? root.bar.foreground : Commons.Color.urgent
               opacity: 0.8
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
             }
-          }
-
-          // Released: nothing runs on the NPU
-          Text {
-            visible: root.released
-            textFormat: Text.PlainText
-            text: "Turn the NPU on to load a model."
-            color: root.bar.foreground
-            opacity: 0.6
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            width: parent.width
-            wrapMode: Text.WordWrap
-          }
-
-          // Not loaded, nothing downloaded
-          Text {
-            visible: !root.llm && !root.released && root.downloaded.length === 0
-            textFormat: Text.PlainText
-            text: "No models downloaded yet. In a terminal: amd-npu models, then amd-npu pull qwen3.5:4b"
-            color: root.bar.foreground
-            opacity: 0.6
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            width: parent.width
-            wrapMode: Text.WordWrap
-          }
-
-          // Not loaded: pick a downloaded model, a mode, then load
-          Column {
-            visible: !root.llm && !root.released && root.downloaded.length > 0
-            width: parent.width
-            spacing: Style.space(6)
-
-            Repeater {
-              model: root.downloaded
-              Button {
-                required property var modelData
-                width: parent.width
-                leftAlign: true
-                text: modelData.name + "   " + modelData.params + ", ~" + modelData.footprint + " GB"
-                fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                bordered: true
-                active: root.selectedModel === modelData.name
-                onClicked: {
-                  root.selectedModel = modelData.name
-                  root.confirming = false
-                }
-              }
-            }
-
-            Row {
-              id: modeRow
-              width: parent.width
-              spacing: Style.space(6)
-              readonly property real cellWidth: (width - spacing) / 2
-
-              Button {
-                width: modeRow.cellWidth
-                text: "Share with Whisper"
-                fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                bordered: true
-                active: !root.loadExclusive
-                onClicked: { root.loadExclusive = false; root.confirming = false }
-              }
-
-              Button {
-                width: modeRow.cellWidth
-                text: "NPU only"
-                fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                bordered: true
-                active: root.loadExclusive
-                onClicked: { root.loadExclusive = true; root.confirming = false }
-              }
-            }
-
-            Text {
-              visible: root.confirming
-              textFormat: Text.PlainText
-              text: "Dictation will use the CPU model (lower accuracy) until you unload " + root.selectedModel + "."
-              color: Commons.Color.urgent
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              width: parent.width
-              wrapMode: Text.WordWrap
-            }
-
-            Row {
-              id: loadRow
-              width: parent.width
-              spacing: Style.space(6)
-              readonly property real cellWidth: (width - spacing) / 2
-
-              Button {
-                visible: root.confirming
-                width: loadRow.cellWidth
-                text: "Cancel"
-                fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                bordered: true
-                onClicked: root.confirming = false
-              }
-
-              Button {
-                width: root.confirming ? loadRow.cellWidth : loadRow.width
-                iconText: "\uf019"
-                text: root.busy === "load" ? "Loading..." : (root.confirming ? "Load anyway" : "Load " + root.selectedModel)
-                fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                bordered: true
-                onClicked: root.requestLoad()
-              }
-            }
-          }
-        }
-
-        PanelSeparator { visible: !root.setupMode; foreground: root.bar.foreground }
-
-        // ---------- Details ----------
-        Column {
-          visible: !root.setupMode
-          width: parent.width
-          spacing: Style.space(8)
-
-          PanelSectionHeader {
-            text: "DICTATION"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-          }
-
-          InfoPair { label: "Whisper"; value: (root.info.modelName || "whisper-v3:turbo") + (root.info.model === false ? " (not downloaded)" : "") }
-          InfoPair { label: "Embeddings"; value: root.embedText() }
-          InfoPair { label: "NPU firmware"; value: root.info.firmware || "-" }
-          InfoPair { label: "Voxtype uses"; value: root.backendText() }
-
-          Row {
-            id: micRow
-            width: parent.width
-            spacing: Style.space(8)
-
-            InfoLabel { id: micLabelText; text: "Microphone" }
-            Item { width: Math.max(0, micRow.width - micLabelText.implicitWidth - micValue.width - micRow.spacing * 2); height: 1 }
-            InfoValue {
-              id: micValue
-              width: Math.min(implicitWidth, micRow.width - micLabelText.implicitWidth - micRow.spacing * 2)
-              elide: Text.ElideRight
-              text: (root.micName || "none") + (root.micLocked ? " (Voxtype config)" : (root.micMuted ? " (muted)" : ""))
-              color: root.micMuted || !root.micName ? Commons.Color.urgent : root.bar.foreground
-            }
-          }
-
-          // Pick the input (changes the system default, like Omarchy's audio panel)
-          Column {
-            visible: !root.micLocked && root.micInputs.length > 1
-            width: parent.width
-            spacing: Style.space(6)
-
-            Repeater {
-              model: root.micInputs
-              Button {
-                required property var modelData
-                width: parent.width
-                leftAlign: true
-                text: root.micLabel(modelData)
-                fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                bordered: true
-                active: !!root.micSource && modelData.id === root.micSource.id
-                onClicked: root.setMic(modelData)
-              }
-            }
-
-            InfoLabel {
-              width: parent.width
-              wrapMode: Text.WordWrap
-              text: "Sets the system's default input for all apps, as Omarchy's audio panel does."
-            }
-          }
-
-          // F9: hold to talk (Omarchy's default) or tap to start / tap to stop (amd-npu f9)
-          Row {
-            id: f9Row
-            width: parent.width
-            spacing: Style.space(6)
-            readonly property real labelWidth: silenceLabel.implicitWidth + Style.space(4)
-            readonly property real cellWidth: (width - labelWidth - spacing * 2) / 2
-
-            InfoLabel {
-              width: f9Row.labelWidth
-              anchors.verticalCenter: parent.verticalCenter
-              text: "F9"
-            }
-
-            Repeater {
-              model: [{ mode: "hold", label: "Hold to talk" }, { mode: "toggle", label: "Tap to toggle" }]
-              Button {
-                required property var modelData
-                width: f9Row.cellWidth
-                text: modelData.label
-                fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                bordered: true
-                active: (root.info.f9 || "hold") === modelData.mode
-                onClicked: if (!active) root.runAction("f9", ["f9", modelData.mode])
-              }
-            }
-          }
-
-          // When the countdown says a mic isn't hearing anything
-          Row {
-            id: silenceRow
-            visible: !root.micLocked
-            width: parent.width
-            spacing: Style.space(6)
-            readonly property real labelWidth: silenceLabel.implicitWidth + Style.space(4)
-            readonly property real cellWidth: (width - labelWidth - spacing * 4) / 4
-
-            InfoLabel {
-              id: silenceLabel
-              width: silenceRow.labelWidth
-              anchors.verticalCenter: parent.verticalCenter
-              text: "Warn on silence"
-            }
-
-            Repeater {
-              model: [0, 3, 5, 10]
-              Button {
-                required property var modelData
-                width: silenceRow.cellWidth
-                text: modelData === 0 ? "Off" : modelData + " s"
-                fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                bordered: true
-                active: root.silenceWarnSec === modelData
-                onClicked: root.setSilenceWarn(modelData)
-              }
-            }
-          }
-        }
-
-        // ---------- Actions ----------
-        Column {
-          visible: !root.setupMode
-          width: parent.width
-          spacing: Style.space(8)
-
-          // The plugin was updated but the running proxy/service files are older: enable applies them.
-          Button {
-            visible: !!root.info.stale
-            width: parent.width
-            iconText: "\uf019"
-            text: "Apply plugin update"
-            tooltipText: "Installs the updated proxy and service files (amd-npu enable)"
-            fontSize: Style.font.bodySmall
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            bordered: true
-            onClicked: root.openSetup("enable")
-          }
-
-          Row {
-            id: actionRow
-            width: parent.width
-            spacing: Style.space(6)
-            readonly property real cellWidth: (width - spacing) / 2
-
-            Button {
-              width: actionRow.cellWidth
-              iconText: "\uf130"
-              text: root.testingNpu ? "Testing..." : "Test dictation"
-              visible: !root.released
-              fontSize: Style.font.bodySmall
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              bordered: true
-              onClicked: root.testNpu()
-            }
-
-            Button {
-              width: root.released ? actionRow.width : actionRow.cellWidth
-              iconText: "\uf120"
-              text: "Full status"
-              fontSize: Style.font.bodySmall
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              bordered: true
-              onClicked: root.openFullStatus()
-            }
-          }
-
-          Text {
-            visible: root.npuTest !== ""
-            textFormat: Text.PlainText
-            text: root.npuTest
-            color: root.npuTest.indexOf("OK") >= 0 ? root.bar.foreground : Commons.Color.urgent
-            opacity: 0.8
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
           }
         }
       }

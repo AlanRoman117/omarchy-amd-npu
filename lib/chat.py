@@ -64,7 +64,13 @@ def stream(url, model, messages, think):
 
 def main():
     url, model, think = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-    print(f"{BOLD}{model}{RESET} on the AMD NPU  {DIM}(paste text to summarize, /reset, /exit, Ctrl+C stops an answer){RESET}\n")
+    # FastFlowLM's flash models (gemma4e-flash:e2b, ...) refuse any request with an earlier answer
+    # in it, so each message goes on its own.
+    single_turn = model.split(":")[0].endswith("-flash")
+    print(f"{BOLD}{model}{RESET} on the AMD NPU  {DIM}(paste text to summarize, /reset, /exit, Ctrl+C stops an answer){RESET}")
+    if single_turn:
+        print(f"{DIM}A flash model: each message is answered on its own, without the earlier ones.{RESET}")
+    print()
     messages = []
     while True:
         try:
@@ -81,6 +87,8 @@ def main():
             print(f"{DIM}conversation cleared{RESET}\n")
             continue
 
+        if single_turn:
+            messages = []
         messages.append({"role": "user", "content": prompt})
         answer, usage, in_thinking = [], None, False
         print(f"{BOLD}{model} ›{RESET} ", end="", flush=True)

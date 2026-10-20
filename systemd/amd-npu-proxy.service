@@ -2,7 +2,9 @@
 Description=AMD NPU API on 127.0.0.1:52625 (proxy to FastFlowLM; refuses browser pages and model downloads)
 Documentation=https://github.com/AlanRoman117/omarchy-amd-npu
 PartOf=amd-npu.service
-After=amd-npu.service
+After=amd-npu.service amd-npu-proxy.socket
+# The port comes from amd-npu-proxy.socket, which keeps it bound while this service restarts.
+Requires=amd-npu-proxy.socket
 
 [Service]
 Environment=AMD_NPU_ALLOWED_ORIGINS=
