@@ -26,11 +26,19 @@ so a big model in LM Studio on the GPU keeps its speed while the NPU works.
 
 **Local models on the NPU**
 
-| Model | Generation | Load | Memory (NPU + process) |
-|---|---|---|---|
-| `qwen3.5:0.8b` | **44.7 tok/s** | 1.9 s | ~2.0 GB |
-| `qwen3.5:4b` | **15.2 tok/s** | 3.3 s | ~6.1 GB |
-| Whisper alone | — | — | ~1.0 GB |
+| Model | Generation | Reading a prompt | Load | Memory (NPU + process) | Next to Whisper |
+|---|---|---|---|---|---|
+| `gemma4-it:e4b` (Gemma 4 E4B: text, images, audio) | **13.7 tok/s** | ~570 tok/s | 12 s | ~10.8 GB | ✓ |
+| `gemma4-it:12b` (Gemma 4 12B: text, images, audio) | **6.8 tok/s** | ~310 tok/s | 15 s | ~12.3 GB | ✓ |
+| `qwen3.5:4b` | **15.2 tok/s** | ~600 tok/s | 3.3 s | ~6.1 GB | ✓ |
+| `qwen3.5:0.8b` | **44.7 tok/s** | ~2,000 tok/s | 1.9 s | ~2.0 GB | ✓ |
+| Whisper alone | — | — | — | ~1.0 GB | |
+
+Every model above shares the NPU with dictation; what doesn't fit is Whisper, embeddings and a
+model all at once (loading a model pauses embeddings). Gemma 4 measured with FastFlowLM 1.0.9,
+generation with ~150-token answers, prompt reading at 2,000-9,000 tokens. For comparison, Gemma 4
+E2B ran ~3x faster on the GPU (llama.cpp, Vulkan) but took about twice the energy per answer: use
+the NPU to keep the GPU free and the battery happy, the GPU when you're waiting on the answer.
 
 ## Requirements
 
@@ -132,7 +140,7 @@ power panels:
 
 | Whisper only | Sharing with an LLM | LLM on the NPU alone | Released |
 |:---:|:---:|:---:|:---:|
-| <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models with Share / NPU only and Load, dictation details, microphone, F9 mode, silence warning and the Embeddings switch"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with qwen3.5:0.8b loaded next to Whisper: model details, memory, API address, Test LLM, Chat and Unload; embeddings paused"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with qwen3.5:0.8b on the NPU alone: Share the NPU with dictation button, Voxtype on its CPU model, embeddings still paused"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model, settings that need the NPU dimmed"> |
+| <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models (Gemma 4 12B and E4B, Qwen 3.5) with Share / NPU only and Load, dictation details, the microphone list, F9 mode, silence warning and the Embeddings switch"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with Gemma 4 E4B loaded next to Whisper: model details, memory, API address, Test LLM, Chat and Unload; embeddings paused"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with Gemma 4 12B on the NPU alone: Share the NPU with dictation button, Voxtype on its CPU model, embeddings still paused"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model, settings that need the NPU dimmed"> |
 
 - **Header:** READY, READY + LLM, LLM ONLY, RELEASED, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
   your last dictation time.
