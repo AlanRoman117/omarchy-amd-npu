@@ -37,7 +37,7 @@ unless told otherwise, so `unload`, `resume` and `enable` don't drop it.
 - The maintainer's Voxtype config has **no `[osd]` section** (default `top_margin` 0.85) since
   0.6.0; the countdown positions itself.
 - The maintainer's Z13 normally runs **Whisper only** (`FLM_LLM=` empty), with Voxtype on the NPU.
-  `qwen3.5:0.8b` and `qwen3.5:4b` are downloaded for testing.
+  `qwen3.5:4b`, `gemma4-it:e4b` (its flash twin comes with it) and `gemma4-it:12b` are downloaded for testing (`qwen3.5:0.8b` and `gemma4-it:e2b` were removed 2026-10-21; `~/Work/npu-lab/battery/session.sh` still loads `qwen3.5:0.8b`, so re-pull it before rerunning Test A).
 - The installed plugin (`~/.config/omarchy/plugins/alanroman117.amd-npu/`) is a git clone of the
   public `main`. Keep it in sync after a merge with `omarchy plugin update alanroman117.amd-npu`.
   If `Widget.qml` changed, also run `omarchy restart shell`.

@@ -40,6 +40,10 @@ generation with ~150-token answers, prompt reading at 2,000-9,000 tokens. For co
 E2B ran ~3x faster on the GPU (llama.cpp, Vulkan) but took about twice the energy per answer: use
 the NPU to keep the GPU free and the battery happy, the GPU when you're waiting on the answer.
 
+<p align="center"><a href="docs/screenshots/desktop-models.png"><img src="docs/screenshots/card-models.png" width="260" alt="The card's model list with seven downloaded models: Gemma 4 12B, E2B and E4B, the two Gemma 4 flash variants, Qwen 3.5 0.8B and 4B, with Share with Whisper / NPU only and Load gemma4-it:12b"></a></p>
+<p align="center"><sub>Everything downloaded during testing, in the card (click for the full screen). The flash variants
+come with the regular Gemma 4 E2B and E4B: they reuse the same files.</sub></p>
+
 ## Requirements
 
 - **An AMD XDNA2 NPU:** Ryzen AI 300 (Strix Point), Ryzen AI MAX (Strix Halo), Krackan Point or
@@ -144,8 +148,8 @@ power panels:
 
 - **Header:** READY, READY + LLM, LLM ONLY, RELEASED, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
   your last dictation time.
-- **NPU:** the on/off switch, showing what the NPU holds (e.g. "On: dictation + qwen3.5:0.8b (2.0 GB
-  NPU + 0.9 GB)"). Off **releases** the NPU: the server and any model stop, their memory is freed at
+- **NPU:** the on/off switch, showing what the NPU holds (e.g. "On: dictation + gemma4-it:e4b (5.7 GB
+  NPU + 4.3 GB)"). Off **releases** the NPU: the server and any model stop, their memory is freed at
   once, dictation moves to Voxtype's CPU model, and it stays off across reboots. On brings Whisper
   back (`amd-npu release` / `resume` do the same). In NPU-only mode, **Share the NPU with dictation**
   brings Whisper back next to the model.
