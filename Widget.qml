@@ -37,6 +37,10 @@ Panel {
   property string selectedModel: ""
   property bool loadExclusive: false
   property bool confirming: false
+  // Context for the next load: -1 is the model's own default (FastFlowLM's catalog), otherwise a
+  // size up to the model's limit. Back to the default whenever another model is picked.
+  property int selectedCtx: -1
+  onSelectedModelChanged: selectedCtx = -1
 
   // Live dictation countdown: Voxtype's state while F9 is held, against its
   // max_duration_secs (read from ~/.config/voxtype/config.toml, default 60).
@@ -185,7 +189,8 @@ Panel {
       return
     }
     confirming = false
-    runAction("load", loadExclusive ? ["load", selectedModel, "--exclusive", "--yes"] : ["load", selectedModel])
+    var args = ["load", selectedModel, "--ctx", String(selectedCtx)]
+    runAction("load", loadExclusive ? args.concat(["--exclusive", "--yes"]) : args)
   }
 
   function testNpu() {
@@ -433,6 +438,29 @@ Panel {
     id: barFlash
     interval: 700
     onTriggered: vbar.active = flick.moving || vbar.pressed || vbar.hovered
+  }
+
+  // 32768 -> "32k"
+  function kTokens(n) {
+    return Math.round(Number(n) / 1024) + "k"
+  }
+
+  // Context sizes for the selected model: its default, then 64k / 128k / 256k up to its own limit.
+  function ctxChoices() {
+    var m = null
+    for (var i = 0; i < downloaded.length; i++) if (downloaded[i].name === selectedModel) m = downloaded[i]
+    if (!m) return []
+    var def = Number(m.ctx || 32768), most = Number(m.maxCtx || def)
+    var out = [{ value: -1, label: kTokens(def) }]
+    var sizes = [65536, 131072, 262144]
+    for (var j = 0; j < sizes.length; j++) if (sizes[j] > def && sizes[j] <= most) out.push({ value: sizes[j], label: kTokens(sizes[j]) })
+    return out
+  }
+
+  function ctxText() {
+    if (!llm) return ""
+    var set = Number(llm.ctxSetting)
+    return set > 0 ? kTokens(set) + " tokens" : kTokens(llm.ctx || 32768) + " tokens (model default)"
   }
 
   onDownloadedChanged: {
@@ -910,6 +938,7 @@ Panel {
               InfoPair { label: "Model"; value: root.llm ? root.llm.name : "" }
               InfoPair { label: "Size"; value: root.llm ? root.llm.params + " " + root.llm.quant : "" }
               InfoPair { label: "Mode"; value: root.exclusive ? "NPU only (dictation on CPU)" : "Shared with Whisper" }
+              InfoPair { label: "Context"; value: root.ctxText() }
               InfoPair { label: "Memory"; value: root.gb(root.info.npuMb) + " NPU + " + root.gb(root.info.rssMb) }
               InfoPair { label: "API"; value: "127.0.0.1:52625/v1" }
 
@@ -1058,6 +1087,49 @@ Panel {
                   active: root.loadExclusive
                   onClicked: { root.loadExclusive = true; root.confirming = false }
                 }
+              }
+
+              // Context: the model's default, or more room for long chats and documents
+              Row {
+                id: ctxRow
+                visible: ctxRepeater.count > 1
+                width: parent.width
+                spacing: Style.space(6)
+                readonly property real labelWidth: ctxLabel.implicitWidth + Style.space(8)
+                readonly property real cellWidth: (width - labelWidth - spacing * ctxRepeater.count) / Math.max(1, ctxRepeater.count)
+
+                InfoLabel {
+                  id: ctxLabel
+                  width: ctxRow.labelWidth
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Context"
+                }
+
+                Repeater {
+                  id: ctxRepeater
+                  model: root.ctxChoices()
+                  Button {
+                    required property var modelData
+                    width: ctxRow.cellWidth
+                    text: modelData.label
+                    tooltipText: modelData.value === -1 ? "The model's own default" : modelData.value + " tokens"
+                    fontSize: Style.font.bodySmall
+                    foreground: root.bar.foreground
+                    fontFamily: root.bar.fontFamily
+                    bordered: true
+                    active: root.selectedCtx === modelData.value
+                    onClicked: root.selectedCtx = modelData.value
+                  }
+                }
+              }
+
+              InfoLabel {
+                visible: ctxRow.visible
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: root.selectedCtx === -1
+                  ? "The model's default. More holds longer chats and documents."
+                  : "Reserves more NPU memory when it loads (Gemma 4 E4B: +2 GB at 128k), and answers slow as a long chat fills it."
               }
 
               Text {

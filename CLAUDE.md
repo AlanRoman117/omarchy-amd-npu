@@ -194,6 +194,15 @@ because only NPU dictations are counted.
   it scrolls. Test scales without touching the config:
   `hyprctl eval 'hl.monitor({ output = "eDP-1", mode = "2560x1600@180", position = "320x1080", scale = 2.5 })'`
   (2560x1600 also divides by 3.2), then `scale = "auto"` to restore; `wtype -k Down` scrolls an open card.
+- **Context picker (0.13.0):** `models_json` adds `maxCtx` for downloaded models
+  (`max_position_embeddings` from `$FLM_MODELS/<repo folder>/config.json`, the folder taken from the catalog
+  URL; flash models are capped at their fixed default, since their config still says 128k). The card offers
+  the default (`-1`, shown as the catalog's `default_context_length`) plus 64k/128k/256k up to `maxCtx`, resets
+  to the default when another model is picked, and always passes `--ctx` on Load (so a CLI `--ctx` doesn't
+  leak into card loads). `load` refuses a `--ctx` above `maxCtx`; `unload` resets `FLM_CTX` to -1. A context
+  change restarts the server (no live swap). Measured 2026-10-22: the NPU memory for context is reserved on
+  load (E4B 5.9/6.6/8.0 GB at 32k/64k/128k; 12B 8.6/9.2/10.2/12.2 GB up to 256k; sliding-window attention
+  keeps it small), all next to Whisper.
 - **Embeddings switch (0.12.0):** Off / On runs `embed off|on` (busy kinds `embedOn`/`embedOff`).
   "Wanted" = `enabled || paused`, so a paused state keeps On lit and Off drops the pause marker. On is
   dimmed while a shared LLM is loaded and embeddings aren't wanted (the CLI would refuse); when the

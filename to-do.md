@@ -48,7 +48,7 @@
       switch Voxtype to the CPU model while an answer is streaming.
 - [x] Gemma 4 E4B and 12B measured (2026-10-21, README model table). Still to measure: `qwen3.5:2b`, `lfm2.5-it:1.2b`,
       `gpt-oss:20b`.
-- [ ] **Next, after the marketplace publishes 0.12.0:** context length picker in the card (`--ctx`; today
+- [x] 0.13.0 (2026-10-22): context length picker in the card (`--ctx`; today
   CLI-only). The model's default stays the default (FastFlowLM's catalog: 32,768 for Gemma 4 and Qwen 3.5;
   Gemma 4 goes up to 128k), with a choice next to Share / NPU only, e.g. Default / 64k / 128k, capped at
   what each model supports. Measure what 128k costs in memory on E4B and the 12B first, and say it on the card.
