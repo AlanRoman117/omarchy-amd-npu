@@ -89,36 +89,6 @@ def installed_models():
         return names
 
 
-_owner_lock = threading.Lock()
-_owner_cache = (0.0, False)
-
-
-def upstream_owned():
-    """True if the listener on the upstream port belongs to this user (cached 5 s).
-
-    On a shared machine another account could bind 6669 while the server is down; forwarding
-    to it would hand over the dictation audio and let it choose the text Voxtype types.
-    Under PrivateUsers=, other accounts' sockets show up as the overflow UID, never ours."""
-    global _owner_cache
-    with _owner_lock:
-        stamp, owned = _owner_cache
-        if time.monotonic() - stamp < 5:
-            return owned
-        owned, want = False, f"0100007F:{UPSTREAM_PORT:04X}"
-        try:
-            with open("/proc/net/tcp") as f:
-                next(f)
-                for line in f:
-                    fields = line.split()
-                    if fields[1] == want and fields[3] == "0A":  # local address, LISTEN
-                        owned = int(fields[7]) == os.getuid()
-                        break
-        except (OSError, ValueError, IndexError, StopIteration):
-            owned = False
-        _owner_cache = (time.monotonic(), owned)
-        return owned
-
-
 _BAD_MULTIPART = (email.errors.NoBoundaryInMultipartDefect, email.errors.StartBoundaryNotFoundDefect,
                   email.errors.CloseBoundaryNotFoundDefect, email.errors.MultipartInvariantViolationDefect)
 
@@ -152,6 +122,33 @@ def peer_uid(client_address, server_address):
             return match_peer_uid(f, client_address[:2], server_address[:2])
     except (OSError, ValueError, StopIteration):
         return None
+
+
+def upstream_connection_owned(sock, attempts=50):
+    """True if the server end of this exact connection to FastFlowLM belongs to this user.
+
+    Checked after connecting and before anything is sent, on the connection's full TCP 4-tuple (the
+    established socket whose local end is the upstream address and remote end is ours), which can't
+    change while the connection lives. A listener check made earlier would leave a window: if
+    FastFlowLM exited after it, another account could bind 6669 and receive the next dictation or
+    chat body and choose the reply. The server-side socket can take a moment to reach ESTABLISHED
+    after connect() returns, hence the short retry (up to ~50 ms). Under PrivateUsers=, other
+    accounts' sockets show as the overflow UID, never ours."""
+    try:
+        ours, theirs = sock.getsockname()[:2], sock.getpeername()[:2]
+    except OSError:
+        return False
+    for _ in range(attempts):
+        try:
+            with open("/proc/net/tcp") as f:
+                next(f)
+                uid = match_peer_uid(f, theirs, ours)
+        except (OSError, ValueError, StopIteration):
+            uid = None
+        if uid is not None:
+            return uid == os.getuid()
+        time.sleep(0.001)
+    return False
 
 
 def multipart_models(body, content_type):
@@ -314,9 +311,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # --- forwarding ------------------------------------------------------------
 
     def forward(self, body):
-        if not upstream_owned():
-            return self.refuse(502, f"port {UPSTREAM_PORT} isn't held by this user's NPU server")
         upstream = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=900)
+        try:
+            upstream.connect()
+        except OSError:
+            return self.refuse(502, "the NPU server isn't answering")
+        # Authenticate this very connection before any request bytes go out on it.
+        if not upstream_connection_owned(upstream.sock):
+            upstream.close()
+            return self.refuse(502, f"port {UPSTREAM_PORT} isn't held by this user's NPU server")
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
         headers["Host"] = f"{UPSTREAM_HOST}:{UPSTREAM_PORT}"
         if body is not None:
