@@ -37,6 +37,10 @@ Panel {
   property string selectedModel: ""
   property bool loadExclusive: false
   property bool confirming: false
+  // Context for the next load: -1 is the model's own default (FastFlowLM's catalog), otherwise a
+  // size up to the model's limit. Back to the default whenever another model is picked.
+  property int selectedCtx: -1
+  onSelectedModelChanged: selectedCtx = -1
 
   // Live dictation countdown: Voxtype's state while F9 is held, against its
   // max_duration_secs (read from ~/.config/voxtype/config.toml, default 60).
@@ -73,6 +77,10 @@ Panel {
   property real lastSoundMs: 0
   property real micSinceMs: 0
   property bool micSilent: false
+  // FastFlowLM answers one request at a time: a dictation sent while a model is writing an answer
+  // waits for it. The proxy reports that (/amd-npu/queue), checked every half second while
+  // transcribing, so the overlay can say so instead of a "Transcribing..." that looks stuck.
+  property bool dictationWaiting: false
   readonly property bool peakWatching: recording && peakArmed && !micLocked && silenceWarnSec > 0 && !!micSource
   readonly property string cardConfigDir: configHome + "/amd-npu"
   onMicSourceChanged: micSinceMs = Date.now()
@@ -99,7 +107,10 @@ Panel {
   property string screensBaseline: ""
   property bool osdRestartPending: false
   readonly property bool osdOwner: !!barScreen && Quickshell.screens.length > 0 && barScreen === Quickshell.screens[0]
-  Component.onCompleted: screensBaseline = screensSig
+  // The baseline is kept in a file too: a scale change makes the bar rebuild its widgets, and a
+  // rebuilt widget taking the new layout as its baseline would never restart the waveform.
+  readonly property string screensFile: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/amd-npu-screens"
+  Component.onCompleted: screensReadProc.running = true
   onScreensSigChanged: if (screensBaseline !== "" && screensSig !== screensBaseline) osdDebounce.restart()
   readonly property bool onFocusedMonitor: !Hyprland.focusedMonitor || !barScreen || Hyprland.focusedMonitor.name === barScreen.name
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
@@ -185,7 +196,8 @@ Panel {
       return
     }
     confirming = false
-    runAction("load", loadExclusive ? ["load", selectedModel, "--exclusive", "--yes"] : ["load", selectedModel])
+    var args = ["load", selectedModel, "--ctx", String(selectedCtx)]
+    runAction("load", loadExclusive ? args.concat(["--exclusive", "--yes"]) : args)
   }
 
   function testNpu() {
@@ -357,6 +369,11 @@ Panel {
     voxDevice = values["audio.device"] || "default"
   }
 
+  function saveScreens() {
+    screensSaveProc.command = ["sh", "-c", "printf '%s\\n' \"$2\" > \"$1\"", "sh", screensFile, screensSig]
+    screensSaveProc.running = true
+  }
+
   function restartWaveform(anyInstance) {
     if (!anyInstance && !osdOwner) return
     if (recState !== "idle") {
@@ -435,6 +452,29 @@ Panel {
     onTriggered: vbar.active = flick.moving || vbar.pressed || vbar.hovered
   }
 
+  // 32768 -> "32k"
+  function kTokens(n) {
+    return Math.round(Number(n) / 1024) + "k"
+  }
+
+  // Context sizes for the selected model: its default, then 64k / 128k / 256k up to its own limit.
+  function ctxChoices() {
+    var m = null
+    for (var i = 0; i < downloaded.length; i++) if (downloaded[i].name === selectedModel) m = downloaded[i]
+    if (!m) return []
+    var def = Number(m.ctx || 32768), most = Number(m.maxCtx || def)
+    var out = [{ value: -1, label: kTokens(def) }]
+    var sizes = [65536, 131072, 262144]
+    for (var j = 0; j < sizes.length; j++) if (sizes[j] > def && sizes[j] <= most) out.push({ value: sizes[j], label: kTokens(sizes[j]) })
+    return out
+  }
+
+  function ctxText() {
+    if (!llm) return ""
+    var set = Number(llm.ctxSetting)
+    return set > 0 ? kTokens(set) + " tokens" : kTokens(llm.ctx || 32768) + " tokens (model default)"
+  }
+
   onDownloadedChanged: {
     var names = downloaded.map(function(m) { return m.name })
     if (names.indexOf(selectedModel) < 0) selectedModel = names.length > 0 ? names[0] : ""
@@ -453,6 +493,28 @@ Panel {
         if (value !== "") root.status = value
       }
     }
+  }
+
+  Process {
+    id: queueProc
+    command: ["curl", "-s", "--noproxy", "*", "-m", "1", "http://127.0.0.1:52625/amd-npu/queue"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var waiting = false
+        try { waiting = !!JSON.parse(String(text || "{}")).dictationWaiting } catch (e) { }
+        root.dictationWaiting = waiting && root.recState === "transcribing"
+      }
+    }
+  }
+
+  Timer {
+    interval: 500
+    repeat: true
+    triggeredOnStart: true
+    running: root.recState === "transcribing" && root.onFocusedMonitor && root.status === "ready"
+    onTriggered: if (!queueProc.running) queueProc.running = true
+    onRunningChanged: if (!running) root.dictationWaiting = false
   }
 
   Process {
@@ -557,8 +619,28 @@ Panel {
     interval: 3000
     onTriggered: {
       root.screensBaseline = root.screensSig
+      root.saveScreens()
       root.restartWaveform(false)
     }
+  }
+
+  // The layout the waveform was last placed for (this boot), or the current one on the first run.
+  Process {
+    id: screensReadProc
+    command: ["cat", root.screensFile]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var last = String(text || "").trim()
+        root.screensBaseline = last !== "" ? last : root.screensSig
+        if (last === "") root.saveScreens()
+        else if (last !== root.screensSig) osdDebounce.restart()
+      }
+    }
+  }
+
+  Process {
+    id: screensSaveProc
   }
 
   // The overlay's process name is truncated to 15 characters by the kernel ("voxtype-osd-gtk4").
@@ -620,7 +702,7 @@ Panel {
     remaining: Math.max(0, root.recRemaining)
     limit: root.recLimit
     warn: root.recWarn
-    label: root.recState === "transcribing" ? "Transcribing..."
+    label: root.recState === "transcribing" ? (root.dictationWaiting ? "Waiting for the model response to finish on the NPU..." : "Transcribing...")
       : root.mmss(Math.max(0, root.recRemaining)) + (root.recWarn ? " left - finishing soon" : " left")
     voxEnabled: root.voxOsdEnabled
     voxPosition: root.voxOsdPosition
@@ -910,6 +992,7 @@ Panel {
               InfoPair { label: "Model"; value: root.llm ? root.llm.name : "" }
               InfoPair { label: "Size"; value: root.llm ? root.llm.params + " " + root.llm.quant : "" }
               InfoPair { label: "Mode"; value: root.exclusive ? "NPU only (dictation on CPU)" : "Shared with Whisper" }
+              InfoPair { label: "Context"; value: root.ctxText() }
               InfoPair { label: "Memory"; value: root.gb(root.info.npuMb) + " NPU + " + root.gb(root.info.rssMb) }
               InfoPair { label: "API"; value: "127.0.0.1:52625/v1" }
 
@@ -1058,6 +1141,49 @@ Panel {
                   active: root.loadExclusive
                   onClicked: { root.loadExclusive = true; root.confirming = false }
                 }
+              }
+
+              // Context: the model's default, or more room for long chats and documents
+              Row {
+                id: ctxRow
+                visible: ctxRepeater.count > 1
+                width: parent.width
+                spacing: Style.space(6)
+                readonly property real labelWidth: ctxLabel.implicitWidth + Style.space(8)
+                readonly property real cellWidth: (width - labelWidth - spacing * ctxRepeater.count) / Math.max(1, ctxRepeater.count)
+
+                InfoLabel {
+                  id: ctxLabel
+                  width: ctxRow.labelWidth
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Context"
+                }
+
+                Repeater {
+                  id: ctxRepeater
+                  model: root.ctxChoices()
+                  Button {
+                    required property var modelData
+                    width: ctxRow.cellWidth
+                    text: modelData.label
+                    tooltipText: modelData.value === -1 ? "The model's own default" : modelData.value + " tokens"
+                    fontSize: Style.font.bodySmall
+                    foreground: root.bar.foreground
+                    fontFamily: root.bar.fontFamily
+                    bordered: true
+                    active: root.selectedCtx === modelData.value
+                    onClicked: root.selectedCtx = modelData.value
+                  }
+                }
+              }
+
+              InfoLabel {
+                visible: ctxRow.visible
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: root.selectedCtx === -1
+                  ? "The model's default. More holds longer chats and documents."
+                  : "Reserves more NPU memory when it loads (Gemma 4 E4B: +2 GB at 128k), and answers slow as a long chat fills it."
               }
 
               Text {

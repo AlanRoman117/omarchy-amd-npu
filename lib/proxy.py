@@ -52,13 +52,32 @@ ALLOWED_HOSTS = {f"127.0.0.1:{LISTEN_PORT}", f"localhost:{LISTEN_PORT}"}
 JSON_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/embeddings",
                   "/api/chat", "/api/generate", "/api/embed", "/api/embeddings", "/api/show")
 MULTIPART_ENDPOINTS = ("/v1/audio/transcriptions",)
-# Everything that may be forwarded, by method. Not here: /api/pull (downloads), /load (swaps
+# The proxy's own status route (answered here, never forwarded): whether a dictation is waiting
+# behind a model answer, for the card's countdown overlay.
+STATUS_PATH = "/amd-npu/queue"
+# Everything that may be requested, by method. Not here: /api/pull (downloads), /load (swaps
 # models outside amd-npu), /api/cancel, /api/npu/status and whatever a later FastFlowLM adds.
 ROUTES = {
-    "GET": {"/api/version", "/api/tags", "/api/ps", "/v1/models", "/v1/version"},
+    "GET": {"/api/version", "/api/tags", "/api/ps", "/v1/models", "/v1/version", STATUS_PATH},
     "POST": set(JSON_ENDPOINTS) | set(MULTIPART_ENDPOINTS),
 }
 ROUTES["HEAD"] = ROUTES["GET"]
+# Requests in flight to FastFlowLM, as {id: (kind, start)}. FastFlowLM runs one request at a time,
+# first come first served, so a transcription that arrived after a model answer still in flight is
+# waiting for it to finish.
+ANSWER_PATHS = {"/v1/chat/completions", "/v1/completions", "/api/chat", "/api/generate"}
+_inflight = {}
+_inflight_lock = threading.Lock()
+
+
+def queue_status():
+    with _inflight_lock:
+        items = list(_inflight.values())
+    answers = [start for kind, start in items if kind == "answer"]
+    waiting = any(kind == "transcription" and any(a < start for a in answers) for kind, start in items)
+    return {"answering": len(answers), "dictationWaiting": waiting}
+
+
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
               "trailer", "transfer-encoding", "upgrade", "host", "content-length"}
 MAX_BODY = 512 * 1024 * 1024  # audio uploads can be large; anything bigger is refused
@@ -227,6 +246,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.close_connection = True
 
+    def reply_json(self, data):
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+        self.close_connection = True
+
     def read_body(self):
         """The request body, or (code, reason) to refuse it."""
         te = self.headers.get_all("Transfer-Encoding") or []
@@ -389,7 +419,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if refusal:
                 return self.refuse(*refusal)
         self._deadline.cancel()  # the request is in; streaming the answer may take minutes
-        self.forward(body)
+        if path == STATUS_PATH:
+            return self.reply_json(queue_status())
+        kind = "answer" if path in ANSWER_PATHS else ("transcription" if path in MULTIPART_ENDPOINTS else "other")
+        key = object()
+        with _inflight_lock:
+            _inflight[key] = (kind, time.monotonic())
+        try:
+            self.forward(body)
+        finally:
+            with _inflight_lock:
+                _inflight.pop(key, None)
 
     def do_OPTIONS(self):
         if self.allowed_origin() and self.headers.get("Host", "") in ALLOWED_HOSTS:

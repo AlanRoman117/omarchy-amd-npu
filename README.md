@@ -118,8 +118,9 @@ amd-npu unload                 # back to Whisper only
 | Unload | Back to Whisper only | Whisper returns and dictation moves back to the NPU |
 
 While a model is loaded, other apps can use it at `http://127.0.0.1:52625/v1` (OpenAI API, model name
-as shown by `amd-npu models`) or `http://127.0.0.1:52625/api` (Ollama API). In share mode, a long
-answer holds up dictation, so keep heavy API use to NPU-only sessions.
+as shown by `amd-npu models`) or `http://127.0.0.1:52625/api` (Ollama API). In share mode the model
+and dictation take the NPU turn by turn (one request at a time), so a long answer holds up dictation
+until it finishes; keep heavy API use to NPU-only sessions.
 
 Downloads are always a deliberate `amd-npu pull`. The card and `load` only offer models you've already
 downloaded; the card's Embeddings **On** opens a terminal for the embedding model's download, which asks
@@ -144,7 +145,7 @@ power panels:
 
 | Whisper only | Sharing with an LLM | LLM on the NPU alone | Released |
 |:---:|:---:|:---:|:---:|
-| <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models (Gemma 4 12B and E4B, Qwen 3.5 4B) with Share / NPU only and Load, dictation details, the microphone list, F9 mode, silence warning and the Embeddings switch"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with Gemma 4 E4B loaded next to Whisper: model details, memory, API address, Test LLM, Chat and Unload; embeddings paused"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with Gemma 4 12B on the NPU alone: Share the NPU with dictation button, Voxtype on its CPU model, embeddings still paused"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model, settings that need the NPU dimmed"> |
+| <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models (Gemma 4 12B and E4B, Qwen 3.5 4B) with Share / NPU only, the Context sizes and Load, dictation details, microphone, F9 mode, silence warning and the Embeddings switch"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with Gemma 4 E4B loaded next to Whisper at 128k context: model details, context, memory, API address, Test LLM, Chat and Unload; embeddings paused"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with Gemma 4 12B on the NPU alone at its default 32k context: Share the NPU with dictation button, Voxtype on its CPU model, embeddings still paused"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model, settings that need the NPU dimmed"> |
 
 - **Header:** READY, READY + LLM, LLM ONLY, RELEASED, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
   your last dictation time.
@@ -155,7 +156,13 @@ power panels:
   brings Whisper back next to the model.
 - **Local model:** when loaded, its name, size, mode, memory (NPU buffers + process) and API address,
   with **Test LLM** (generation speed), **Chat** and **Unload**. When nothing is loaded, your downloaded models,
-  a Share / NPU only choice, and **Load** (NPU only asks you to confirm first).
+  a Share / NPU only choice, a **Context** size, and **Load** (NPU only asks you to confirm first).
+  Context starts at the model's own default (32k for Gemma 4 and Qwen 3.5) and offers 64k, 128k and
+  256k up to what the model supports (Gemma 4 E4B: 128k; Gemma 4 12B and Qwen 3.5: 256k; flash models
+  stay at 1k). More context holds longer chats and documents, but the NPU memory for it is reserved
+  when the model loads: Gemma 4 E4B 5.9 GB at 32k, 6.6 at 64k, 8.0 at 128k; Gemma 4 12B 8.6, 9.2,
+  10.2 and 12.2 at 256k, all still next to Whisper. Answers also slow as a long chat fills it. The
+  loaded model's details show the context in use.
 - **Dictation:** Whisper model, NPU firmware, where Voxtype sends audio, **which microphone** it's
   recording from (red with "(muted)" if that input is muted), **Test dictation** and **Full status**.
   With more than one input, pick one from the list. That sets the system default input, the same as
@@ -187,7 +194,11 @@ limit (`max_duration_secs`):
   **Warn on silence** on the card (Off / 3 s / 5 s / 10 s; kept in `~/.config/amd-npu/card.json`).
   It's only a hint: the recording keeps going. In the last 15 seconds it reads "0:12 left - finishing soon".
 - **The chip in the bar** turns into the time, and switches to the warning colour near the end.
-- **After you let go,** the overlay says "Transcribing..." until the text arrives.
+- **After you let go,** the overlay says "Transcribing..." until the text arrives. With a model loaded
+  next to Whisper, the model and dictation take the NPU **turn by turn**: a dictation sent while the
+  model is writing an answer waits for that answer to finish, and the overlay says **"Waiting for the
+  model response to finish on the NPU..."** until it's dictation's turn. Nothing is lost. To dictate during long answers, load the model **NPU only**
+  (dictation moves to the CPU model).
 
 The countdown places itself just above Voxtype's waveform, wherever Voxtype's `[osd]` settings put
 it (below it if the waveform is near the top, Omarchy's usual overlay spot if it's in a corner), so
@@ -213,7 +224,7 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | `amd-npu ping` | Quiet Whisper check: `ok <seconds>` or `fail <reason>` |
 | `amd-npu models [--json]` | NPU LLMs FastFlowLM offers, with size, memory and download state |
 | `amd-npu pull <model>` | Download a model (asks first) |
-| `amd-npu load <model> [--exclusive] [--ctx N]` | Load next to Whisper, or alone with dictation on the CPU. `--ctx` is `-1` (model default) or 512 and up; if the server won't start, the previous settings are restored |
+| `amd-npu load <model> [--exclusive] [--ctx N]` | Load next to Whisper, or alone with dictation on the CPU. `--ctx` is `-1` (model default) or 512 up to the model's own limit (the card's **Context** row); if the server won't start, the previous settings are restored |
 | `amd-npu unload` | Drop the model; Whisper only, dictation back on the NPU |
 | `amd-npu chat [model] [--think]` | Streaming terminal chat; a multi-line paste is one message (`/reset`, `/exit`, Ctrl+C stops an answer). FastFlowLM's flash models (`*-flash`) answer each message on its own |
 | `amd-npu bench-llm [--raw]` | Measure the loaded model's generation speed |
