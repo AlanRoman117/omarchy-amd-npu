@@ -77,6 +77,10 @@ Panel {
   property real lastSoundMs: 0
   property real micSinceMs: 0
   property bool micSilent: false
+  // FastFlowLM answers one request at a time: a dictation sent while a model is writing an answer
+  // waits for it. The proxy reports that (/amd-npu/queue), checked every half second while
+  // transcribing, so the overlay can say so instead of a "Transcribing..." that looks stuck.
+  property bool dictationWaiting: false
   readonly property bool peakWatching: recording && peakArmed && !micLocked && silenceWarnSec > 0 && !!micSource
   readonly property string cardConfigDir: configHome + "/amd-npu"
   onMicSourceChanged: micSinceMs = Date.now()
@@ -484,6 +488,28 @@ Panel {
   }
 
   Process {
+    id: queueProc
+    command: ["curl", "-s", "--noproxy", "*", "-m", "1", "http://127.0.0.1:52625/amd-npu/queue"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var waiting = false
+        try { waiting = !!JSON.parse(String(text || "{}")).dictationWaiting } catch (e) { }
+        root.dictationWaiting = waiting && root.recState === "transcribing"
+      }
+    }
+  }
+
+  Timer {
+    interval: 500
+    repeat: true
+    triggeredOnStart: true
+    running: root.recState === "transcribing" && root.onFocusedMonitor && root.status === "ready"
+    onTriggered: if (!queueProc.running) queueProc.running = true
+    onRunningChanged: if (!running) root.dictationWaiting = false
+  }
+
+  Process {
     id: infoProc
     command: [root.cli, "status", "--json"]
     stdout: StdioCollector {
@@ -648,7 +674,7 @@ Panel {
     remaining: Math.max(0, root.recRemaining)
     limit: root.recLimit
     warn: root.recWarn
-    label: root.recState === "transcribing" ? "Transcribing..."
+    label: root.recState === "transcribing" ? (root.dictationWaiting ? "Waiting for the model's answer..." : "Transcribing...")
       : root.mmss(Math.max(0, root.recRemaining)) + (root.recWarn ? " left - finishing soon" : " left")
     voxEnabled: root.voxOsdEnabled
     voxPosition: root.voxOsdPosition

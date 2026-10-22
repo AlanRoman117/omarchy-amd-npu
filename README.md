@@ -193,7 +193,11 @@ limit (`max_duration_secs`):
   **Warn on silence** on the card (Off / 3 s / 5 s / 10 s; kept in `~/.config/amd-npu/card.json`).
   It's only a hint: the recording keeps going. In the last 15 seconds it reads "0:12 left - finishing soon".
 - **The chip in the bar** turns into the time, and switches to the warning colour near the end.
-- **After you let go,** the overlay says "Transcribing..." until the text arrives.
+- **After you let go,** the overlay says "Transcribing..." until the text arrives. With a model loaded
+  next to Whisper, the NPU answers one request at a time, so a dictation sent while the model is writing
+  an answer waits for it to finish; the overlay then says **"Waiting for the model's answer..."** until
+  the NPU is free. Nothing is lost. To dictate during long answers, load the model **NPU only**
+  (dictation moves to the CPU model).
 
 The countdown places itself just above Voxtype's waveform, wherever Voxtype's `[osd]` settings put
 it (below it if the waveform is near the top, Omarchy's usual overlay spot if it's in a corner), so
