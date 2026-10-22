@@ -37,7 +37,7 @@ unless told otherwise, so `unload`, `resume` and `enable` don't drop it.
 - The maintainer's Voxtype config has **no `[osd]` section** (default `top_margin` 0.85) since
   0.6.0; the countdown positions itself.
 - The maintainer's Z13 normally runs **Whisper only** (`FLM_LLM=` empty), with Voxtype on the NPU.
-  `qwen3.5:0.8b` and `qwen3.5:4b` are downloaded for testing.
+  `qwen3.5:4b`, `gemma4-it:e4b` (its flash twin comes with it) and `gemma4-it:12b` are downloaded for testing (`qwen3.5:0.8b` and `gemma4-it:e2b` were removed 2026-10-21; `~/Work/npu-lab/battery/session.sh` still loads `qwen3.5:0.8b`, so re-pull it before rerunning Test A).
 - The installed plugin (`~/.config/omarchy/plugins/alanroman117.amd-npu/`) is a git clone of the
   public `main`. Keep it in sync after a merge with `omarchy plugin update alanroman117.amd-npu`.
   If `Widget.qml` changed, also run `omarchy restart shell`.
@@ -126,7 +126,7 @@ clone once installed with `omarchy plugin add`). Edits here don't reach it until
 
 Card states: `card-whisper.png`, `card-share.png`, `card-exclusive.png`, `card-released.png` (qwen3.5:0.8b)
 and `card-setup.png` (the forced `install` state), retaken 2026-10-16 in Osaka Jade on the Z13 screen
-(1600x1000 logical, `grim -s 1`); the four state shots again 2026-10-19 for 0.12.0's Embeddings row. The
+(1600x1000 logical, `grim -s 1`); the four state shots again 2026-10-19 for 0.12.0's Embeddings row, and 2026-10-21 featuring Gemma 4 (share: gemma4-it:e4b, NPU only: gemma4-it:12b) on the external 1920x1080 monitor at scale 1 (same logical size), on an empty workspace there (`hl.dsp.focus({ workspace = "8" })`; 9 lives on the laptop), `grim -g "1400,0 520x1080"`. Flash variants (`gemma4e-flash:*`) share the regular model's files, so they show as downloaded with it and go when it's removed (`flm remove`). The
 Z13 runs at 2x now: set 1.6 for the shots with `hyprctl eval 'hl.monitor({ output = "eDP-1", mode =
 "2560x1600@180", position = "320x1080", scale = 1.6 })'` and back with `scale = "auto"`. `grim -g` takes
 layout coordinates, so add the screen's position (320,1080): the right side is `-g "1320,1080 600x1000"`. Give the card about 4 s after opening: its `status --json` refresh lands
