@@ -277,8 +277,9 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 - **The API on `127.0.0.1:52625` has no password, but only your account can use it.** The proxy looks
   up who owns each incoming connection and closes other accounts' connections immediately; your own
   are capped at 32 at once. (FastFlowLM's internal port 6669 has no such check; browsers can't
-  reach it, but other local accounts can.) The proxy only forwards to a FastFlowLM port that
-  belongs to you.
+  reach it, but other local accounts can.) Each connection the proxy opens to FastFlowLM is checked
+  before anything is sent on it: the server end of that exact connection must belong to your account,
+  so if FastFlowLM exits and another account takes its port, requests are refused, not handed over.
 - **Dictation only goes to your own account's port.** Voxtype talks plain HTTP and can't check who
   answers on 52625, so on a shared machine another account holding that port would get your audio and
   choose the text that gets typed. Two things stop that:
