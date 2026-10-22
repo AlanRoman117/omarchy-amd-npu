@@ -107,7 +107,10 @@ Panel {
   property string screensBaseline: ""
   property bool osdRestartPending: false
   readonly property bool osdOwner: !!barScreen && Quickshell.screens.length > 0 && barScreen === Quickshell.screens[0]
-  Component.onCompleted: screensBaseline = screensSig
+  // The baseline is kept in a file too: a scale change makes the bar rebuild its widgets, and a
+  // rebuilt widget taking the new layout as its baseline would never restart the waveform.
+  readonly property string screensFile: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/amd-npu-screens"
+  Component.onCompleted: screensReadProc.running = true
   onScreensSigChanged: if (screensBaseline !== "" && screensSig !== screensBaseline) osdDebounce.restart()
   readonly property bool onFocusedMonitor: !Hyprland.focusedMonitor || !barScreen || Hyprland.focusedMonitor.name === barScreen.name
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
@@ -366,6 +369,11 @@ Panel {
     voxDevice = values["audio.device"] || "default"
   }
 
+  function saveScreens() {
+    screensSaveProc.command = ["sh", "-c", "printf '%s\\n' \"$2\" > \"$1\"", "sh", screensFile, screensSig]
+    screensSaveProc.running = true
+  }
+
   function restartWaveform(anyInstance) {
     if (!anyInstance && !osdOwner) return
     if (recState !== "idle") {
@@ -611,8 +619,28 @@ Panel {
     interval: 3000
     onTriggered: {
       root.screensBaseline = root.screensSig
+      root.saveScreens()
       root.restartWaveform(false)
     }
+  }
+
+  // The layout the waveform was last placed for (this boot), or the current one on the first run.
+  Process {
+    id: screensReadProc
+    command: ["cat", root.screensFile]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var last = String(text || "").trim()
+        root.screensBaseline = last !== "" ? last : root.screensSig
+        if (last === "") root.saveScreens()
+        else if (last !== root.screensSig) osdDebounce.restart()
+      }
+    }
+  }
+
+  Process {
+    id: screensSaveProc
   }
 
   // The overlay's process name is truncated to 15 characters by the kernel ("voxtype-osd-gtk4").
@@ -674,7 +702,7 @@ Panel {
     remaining: Math.max(0, root.recRemaining)
     limit: root.recLimit
     warn: root.recWarn
-    label: root.recState === "transcribing" ? (root.dictationWaiting ? "Waiting for the model's answer..." : "Transcribing...")
+    label: root.recState === "transcribing" ? (root.dictationWaiting ? "Waiting for the model response to finish on the NPU..." : "Transcribing...")
       : root.mmss(Math.max(0, root.recRemaining)) + (root.recWarn ? " left - finishing soon" : " left")
     voxEnabled: root.voxOsdEnabled
     voxPosition: root.voxOsdPosition

@@ -118,8 +118,9 @@ amd-npu unload                 # back to Whisper only
 | Unload | Back to Whisper only | Whisper returns and dictation moves back to the NPU |
 
 While a model is loaded, other apps can use it at `http://127.0.0.1:52625/v1` (OpenAI API, model name
-as shown by `amd-npu models`) or `http://127.0.0.1:52625/api` (Ollama API). In share mode, a long
-answer holds up dictation, so keep heavy API use to NPU-only sessions.
+as shown by `amd-npu models`) or `http://127.0.0.1:52625/api` (Ollama API). In share mode the model
+and dictation take the NPU turn by turn (one request at a time), so a long answer holds up dictation
+until it finishes; keep heavy API use to NPU-only sessions.
 
 Downloads are always a deliberate `amd-npu pull`. The card and `load` only offer models you've already
 downloaded; the card's Embeddings **On** opens a terminal for the embedding model's download, which asks
@@ -144,7 +145,7 @@ power panels:
 
 | Whisper only | Sharing with an LLM | LLM on the NPU alone | Released |
 |:---:|:---:|:---:|:---:|
-| <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models (Gemma 4 12B and E4B, Qwen 3.5 4B) with Share / NPU only and Load, dictation details, the microphone list, F9 mode, silence warning and the Embeddings switch"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with Gemma 4 E4B loaded next to Whisper: model details, memory, API address, Test LLM, Chat and Unload; embeddings paused"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with Gemma 4 12B on the NPU alone: Share the NPU with dictation button, Voxtype on its CPU model, embeddings still paused"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model, settings that need the NPU dimmed"> |
+| <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models (Gemma 4 12B and E4B, Qwen 3.5 4B) with Share / NPU only, the Context sizes and Load, dictation details, microphone, F9 mode, silence warning and the Embeddings switch"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with Gemma 4 E4B loaded next to Whisper at 128k context: model details, context, memory, API address, Test LLM, Chat and Unload; embeddings paused"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with Gemma 4 12B on the NPU alone at its default 32k context: Share the NPU with dictation button, Voxtype on its CPU model, embeddings still paused"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model, settings that need the NPU dimmed"> |
 
 - **Header:** READY, READY + LLM, LLM ONLY, RELEASED, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
   your last dictation time.
@@ -194,9 +195,9 @@ limit (`max_duration_secs`):
   It's only a hint: the recording keeps going. In the last 15 seconds it reads "0:12 left - finishing soon".
 - **The chip in the bar** turns into the time, and switches to the warning colour near the end.
 - **After you let go,** the overlay says "Transcribing..." until the text arrives. With a model loaded
-  next to Whisper, the NPU answers one request at a time, so a dictation sent while the model is writing
-  an answer waits for it to finish; the overlay then says **"Waiting for the model's answer..."** until
-  the NPU is free. Nothing is lost. To dictate during long answers, load the model **NPU only**
+  next to Whisper, the model and dictation take the NPU **turn by turn**: a dictation sent while the
+  model is writing an answer waits for that answer to finish, and the overlay says **"Waiting for the
+  model response to finish on the NPU..."** until it's dictation's turn. Nothing is lost. To dictate during long answers, load the model **NPU only**
   (dictation moves to the CPU model).
 
 The countdown places itself just above Voxtype's waveform, wherever Voxtype's `[osd]` settings put

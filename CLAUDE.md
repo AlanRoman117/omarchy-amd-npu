@@ -194,13 +194,19 @@ because only NPU dictations are counted.
   it scrolls. Test scales without touching the config:
   `hyprctl eval 'hl.monitor({ output = "eDP-1", mode = "2560x1600@180", position = "320x1080", scale = 2.5 })'`
   (2560x1600 also divides by 3.2), then `scale = "auto"` to restore; `wtype -k Down` scrolls an open card.
+- **Waveform after a scale change (0.13.0):** changing a monitor's scale makes the bar rebuild its
+  widgets, and the rebuilt widget used to take the new layout as its baseline, so the Voxtype waveform
+  kept the old geometry (found 2026-10-22: after screenshots at 1.6x, the waveform drew below the 2x
+  screen). The baseline now also lives in `$XDG_RUNTIME_DIR/amd-npu-screens`; a new widget compares
+  against it. Tested: 2 -> 1.6 and back each restart the overlay, a plain shell restart doesn't. Voxtype
+  itself restarts (and starts a fresh overlay) on every NPU-only/release switch.
 - **Queued dictation (0.13.0):** FastFlowLM serves one request at a time, first come first served
   (2026-10-22: a 22.5 s dictation waited 58 s behind a Gemma 4 E4B answer). The proxy keeps the requests
   it has in flight (`_inflight`: answer / transcription / other, with start times) and answers
   `GET /amd-npu/queue` itself with `{"answering", "dictationWaiting"}`: waiting = a transcription
   started after an answer that's still in flight. Same admission and origin checks as every route.
   While Voxtype is transcribing, the card polls it every 500 ms and the overlay says "Waiting for the
-  model's answer..." instead of "Transcribing...". Test without typing: start a long chat request, then
+  model response to finish on the NPU..." (the user's wording) instead of "Transcribing...". Test without typing: start a long chat request, then
   `amd-npu ping` (a transcription through the proxy) and read the route.
 - **Context picker (0.13.0):** `models_json` adds `maxCtx` for downloaded models
   (`max_position_embeddings` from `$FLM_MODELS/<repo folder>/config.json`, the folder taken from the catalog
