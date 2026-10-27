@@ -10,7 +10,7 @@ set -euo pipefail
 # Local API calls must never go through an HTTP proxy from the environment.
 export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}" NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
 
-VERSION=0.13.0
+VERSION=0.13.1
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
@@ -469,9 +469,14 @@ restart_server() {
 
 # LLMs only: Whisper and the embedding model are left out. ctx is FastFlowLM's default context;
 # maxCtx, for downloaded models, is the model's own limit (max_position_embeddings in its config).
+# Both come from files and a catalog amd-npu doesn't control, so only a plain positive whole number
+# is kept (anything else becomes null): they end up in comparisons, and Bash arithmetic would run
+# commands hidden in a string like "x[$(...)]" (HANCORE's review of 0.13.0).
 models_json() {
   flm list --json 2>/dev/null | python3 -c '
 import json, os, re, sys
+def count(v):
+    return v if type(v) is int and 0 < v < 100000000 else None
 out = []
 for m in json.load(sys.stdin).get("models", []):
     labels = m.get("label") or []
@@ -482,14 +487,14 @@ for m in json.load(sys.stdin).get("models", []):
     if m.get("installed") and folder:
         try:
             with open(os.path.join(sys.argv[1], folder.group(1), "config.json")) as f:
-                most = json.load(f).get("max_position_embeddings")
+                most = count(json.load(f).get("max_position_embeddings"))
         except (OSError, ValueError):
             pass
     if str(m.get("name", "")).split(":")[0].endswith("-flash"):
-        most = m.get("default_context_length")  # flash models have a fixed context
+        most = count(m.get("default_context_length"))  # flash models have a fixed context
     d = m.get("details") or {}
     out.append({"name": m.get("name"), "installed": m.get("installed"), "footprint": m.get("footprint"),
-                "ctx": m.get("default_context_length"), "maxCtx": most,
+                "ctx": count(m.get("default_context_length")), "maxCtx": most,
                 "params": d.get("parameter_size"), "quant": d.get("quantization_level"),
                 "think": d.get("think", False), "labels": labels})
 print(json.dumps(out, separators=(",", ":")))' "$FLM_MODELS" 2>/dev/null || echo '[]'
@@ -515,7 +520,8 @@ embed_status_json() {
 embed_answers() {
   local out; out=$(curl -s -m 60 -H 'content-type: application/json' \
     -d "{\"model\":\"$EMBED_MODEL\",\"input\":\"hello\"}" "$URL/v1/embeddings" 2>/dev/null || true)
-  [[ $(jq -r '.data[0].embedding | length' <<<"$out" 2>/dev/null || echo 0) -gt 0 ]] 2>/dev/null
+  local n; n=$(jq -r '.data[0].embedding | length' <<<"$out" 2>/dev/null || echo 0)
+  [[ $n =~ ^[0-9]+$ && $n -gt 0 ]]
 }
 
 loaded_llm() {
@@ -969,6 +975,8 @@ cmd_load() {
   [[ $ctx == -1 || ( $ctx =~ ^[0-9]{3,7}$ && $ctx -ge 512 ) ]] || die "--ctx must be -1 (the model's default) or a whole number from 512 up"
   require_downloaded_llm "$m"
   local most; most=$(model_info "$m" | jq -r '.maxCtx // empty')
+  # Digits only before any arithmetic (see models_json); $ctx passed the same check above.
+  [[ $most =~ ^[0-9]{1,8}$ ]] || most=""
   [[ $ctx == -1 || -z $most || $ctx -le $most ]] || die "$m takes up to $most tokens of context (--ctx $most or less)"
   local prev prev_ctx saved_env
   prev=$(mode)
