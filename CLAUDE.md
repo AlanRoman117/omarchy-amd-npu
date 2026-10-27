@@ -180,6 +180,14 @@ because only NPU dictations are counted.
   state is idle at once. Restart the socket after.
 - **`enable` doesn't run `flm validate` while the server is up** (it opens the NPU from a second
   process). The running server proves driver, firmware and memlock; firmware comes from `xrt-smi`.
+- **Never let outside data reach Bash arithmetic** (HANCORE's Medium on 0.13.0, b70c61c): `(( ))`,
+  `$(( ))` and the numeric tests in `[[ ]]` (`-lt`, `-le`, `-gt`, ...) evaluate their operands as
+  arithmetic, and an array subscript in a string like `HOME[$(cmd)]` runs `cmd` (reproduced: a model
+  `config.json` with that as `max_position_embeddings` ran a command on `load --ctx`; `set -u` only
+  stops it for unset names). Anything from a file, a server response, the FastFlowLM catalog or a
+  model folder must match `^[0-9]+$` first. `models_json` keeps only real JSON integers (`count()`),
+  and `cmd_load` re-checks digits before comparing. Audit with
+  `grep -nE '\(\(|\$\(\(| -(le|ge|lt|gt|eq|ne) ' bin/amd-npu`.
 - **Always `Commons.Color`, never bare `Color`** (`import qs.Commons as Commons`, as Omarchy 4.0.5's
   own shell does). Qt 6.12 (Omarchy 4.0.5) adds a `QtQuick` `Color` type that can shadow Omarchy's
   singleton, leaving theme colours `undefined` ("Unable to assign [undefined] to QColor"). A
