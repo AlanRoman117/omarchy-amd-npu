@@ -17,6 +17,8 @@ CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 PORT=52625
 # Python by absolute path: a PATH with mise shims first doubles the processes per call.
 PY=/usr/bin/python3; [[ -x $PY ]] || PY=python3
+# -I: don't put the current directory on sys.path (a json.py there would be imported).
+PYI=("$PY" -I)
 URL="http://127.0.0.1:$PORT"
 WHISPER="whisper-v3:turbo"
 # The one embedding model FastFlowLM offers (EmbeddingGemma 300M); loaded with `amd-npu embed on`.
@@ -139,7 +141,7 @@ voxtype_cfg() {
     return 0
   fi
   [[ ${1:-} == set ]] && VOX_CACHE_LOADED=0
-  "$PY" - "$VOXTYPE_CONFIG" "$@" <<'PY'
+  "${PYI[@]}" - "$VOXTYPE_CONFIG" "$@" <<'PY'
 import json, os, re, sys, tempfile, tomllib
 path, op, args = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3:]
 SECTION = os.environ.get("VOX_SECTION") or "whisper"
@@ -217,17 +219,24 @@ vox_cache_load() {
   VOX_CACHE_LOADED=0
   [[ -f $VOXTYPE_CONFIG ]] || return 0
   local k v
-  while IFS= read -r -d '' k && IFS= read -r -d '' v; do VOX_CACHE[$k]=$v; done < <("$PY" - "$VOXTYPE_CONFIG" <<'PY'
+  while IFS= read -r -d '' k && IFS= read -r -d '' v; do [[ -n $k ]] && VOX_CACHE[$k]=$v; done < <("${PYI[@]}" - "$VOXTYPE_CONFIG" <<'PY'
 import os, sys, tomllib
+# Only the keys amd-npu reads, so a key the user's config spells oddly (TOML allows "\u0000" in a
+# quoted key) can't shift the NUL-separated stream.
+KEYS = {"whisper": ("mode", "backend", "remote_endpoint", "remote_model", "remote_timeout_secs", "model"),
+        "output": ("pre_recording_command",)}
 try:
     with open(os.path.realpath(sys.argv[1]), "rb") as f:
         config = tomllib.load(f)
-except (OSError, tomllib.TOMLDecodeError):
+except (OSError, ValueError):  # TOMLDecodeError and UnicodeDecodeError are both ValueErrors
     config = {}
-for section in ("whisper", "output"):
+for section, keys in KEYS.items():
     table = config.get(section, {})
-    for key, value in (table.items() if isinstance(table, dict) else []):
-        if isinstance(value, (dict, list)):
+    if not isinstance(table, dict):
+        continue
+    for key in keys:
+        value = table.get(key)
+        if value is None or isinstance(value, (dict, list)):
             continue
         text = str(value).lower() if isinstance(value, bool) else str(value)
         sys.stdout.write(f"{section}.{key}\0{text.replace(chr(0), '')}\0")
@@ -524,9 +533,11 @@ flm_hidden() {
 flm_list_json() {
   local dir=${XDG_RUNTIME_DIR:-} sig cache tmp out
   if [[ -n $dir && -d $dir && -O $dir ]]; then
-    sig=$({ stat -c '%Y %s' "$(command -v flm)" 2>/dev/null; find "$FLM_MODELS" -maxdepth 2 -printf '%T@ %s %p\n' 2>/dev/null | sort; } | md5sum | cut -c1-32)
+    # A models folder that doesn't exist yet is a signature too (find fails; that's fine here).
+    sig=$({ stat -c '%Y %s' "$(command -v flm)" 2>/dev/null || true; find "$FLM_MODELS" -maxdepth 2 -printf '%T@ %s %p\n' 2>/dev/null | sort || true; } | md5sum | cut -c1-32)
     cache="$dir/amd-npu-flm-list.$sig.json"
-    [[ -s $cache ]] && { cat "$cache"; return 0; }
+    # Another status call may replace the file between the test and the read; then list afresh.
+    [[ -s $cache ]] && cat "$cache" 2>/dev/null && return 0
   fi
   out=$(flm_hidden list --json 2>/dev/null) || true
   if [[ -n ${cache:-} ]] && jq -e '.models | type == "array"' >/dev/null 2>&1 <<<"$out"; then
@@ -537,7 +548,7 @@ flm_list_json() {
 }
 
 models_json() {
-  flm_list_json | "$PY" -c '
+  flm_list_json | "${PYI[@]}" -c '
 import json, os, re, sys
 def count(v):
     return v if type(v) is int and 0 < v < 100000000 else None
@@ -863,13 +874,23 @@ npu_firmware() {
     v=$(head -c 64 "$f" | tr -d '\n')
     [[ $v =~ ^[0-9A-Za-z._-]+$ ]] && { echo "$v"; return 0; }
   done
-  cache=${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/amd-npu-fw}
-  [[ -n $cache && -s $cache ]] && { cat "$cache"; return 0; }
+  # Kept only in this user's own runtime directory (owner checked, no symlinks followed); "-" means
+  # xrt-smi had no answer, so it isn't asked again this boot.
+  local dir=${XDG_RUNTIME_DIR:-} tmp
+  [[ -n $dir && -d $dir && -O $dir ]] && cache="$dir/amd-npu-fw"
+  if [[ -n $cache && -f $cache && ! -L $cache ]]; then
+    v=$(head -c 64 "$cache" 2>/dev/null | tr -d '\n')
+    [[ $v == - ]] && return 0
+    [[ $v =~ ^[0-9A-Za-z._-]+$ ]] && { echo "$v"; return 0; }
+  fi
   command -v xrt-smi >/dev/null || return 0
   v=$(xrt-smi examine 2>/dev/null | grep -oP 'NPU Firmware Version\s*:\s*\K\S+' | head -1 || true)
-  [[ -n $v ]] || return 0
-  [[ -n $cache ]] && printf '%s\n' "$v" >"$cache"
-  echo "$v"
+  [[ $v =~ ^[0-9A-Za-z._-]+$ ]] || v=""
+  if [[ -n $cache ]] && tmp=$(mktemp "$dir/.amd-npu-fw.XXXXXX"); then
+    printf '%s\n' "${v:--}" >"$tmp" && mv -f "$tmp" "$cache"
+  fi
+  [[ -n $v ]] && echo "$v"
+  return 0
 }
 
 cmd_status() {
@@ -929,7 +950,7 @@ cmd_status() {
 cmd_ping() {
   local wav body code
   wav=$(mktemp --suffix=.wav) body=$(mktemp)
-  "$PY" -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0'*16000); w.close()" "$wav"
+  "${PYI[@]}" -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0'*16000); w.close()" "$wav"
   code=$(curl -s -m 60 -o "$body" -w '%{http_code} %{time_total}' "$URL/v1/audio/transcriptions" -F "file=@$wav" -F "model=$WHISPER" || true)
   # With Whisper off the server still answers 200, with a body of `null`.
   if [[ ${code%% *} == 200 ]] && jq -e 'type == "object" and has("text")' "$body" >/dev/null 2>&1; then
@@ -1158,7 +1179,7 @@ cmd_chat() {
   [[ -n $m ]] || die "No model loaded. Load one first (amd-npu load <model>) or name it: amd-npu chat <model>"
   require_downloaded_llm "$m"
   [[ $m == "$(loaded_llm)" ]] || { npu_guard; cmd_load "$m" >/dev/null; }
-  "$PY" "$ROOT/lib/chat.py" "$URL" "$m" "$think"
+  "${PYI[@]}" "$ROOT/lib/chat.py" "$URL" "$m" "$think"
 }
 
 # Measures the loaded LLM: prints human text, or "ok <prefill> <decode> <tokens>" with --raw.

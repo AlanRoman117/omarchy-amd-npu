@@ -194,7 +194,10 @@ because only NPU dictations are counted.
   0.13 s / 119; card open 25 s with 0 ms NPU activity.
 - **Cheap status (0.14.0):** `vox_cache_load` reads Voxtype's [whisper] and [output] once (NUL-separated,
   one Python start) for `status`, `status --json` and `doctor`; `voxtype_cfg get` serves from it until a
-  `set`. Call it in the main shell, not inside `$(...)`, or the snapshot is lost. Python runs as
+  `set`. Call it in the main shell, not inside `$(...)`, or the snapshot is lost. It holds only the keys in its
+  `KEYS` list (security review: a quoted TOML key with `\u0000` could otherwise shift the NUL-separated
+  stream): add any new key `voxtype_cfg get` reads there, or it reads as empty. Python runs with `-I`
+  (`PYI`), so a `json.py` in the current directory isn't imported. Python runs as
   `/usr/bin/python3` (`$PY`): the user's PATH puts mise shims first, doubling processes per call. The
   dictation guard's hook keeps `python3` (changing it would rewrite users' Voxtype configs for ~7 ms).
 - **Idle cost, for proportion (2026-10-27):** card closed, everything the plugin runs is <10 mW (quickshell
