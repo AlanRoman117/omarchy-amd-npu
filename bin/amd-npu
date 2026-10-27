@@ -10,11 +10,13 @@ set -euo pipefail
 # Local API calls must never go through an HTTP proxy from the environment.
 export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}" NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
 
-VERSION=0.13.1
+VERSION=0.14.0
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
 PORT=52625
+# Python by absolute path: a PATH with mise shims first doubles the processes per call.
+PY=/usr/bin/python3; [[ -x $PY ]] || PY=python3
 URL="http://127.0.0.1:$PORT"
 WHISPER="whisper-v3:turbo"
 # The one embedding model FastFlowLM offers (EmbeddingGemma 300M); loaded with `amd-npu embed on`.
@@ -130,7 +132,14 @@ wait_for_server() {
 #   voxtype_cfg dump                  the keys amd-npu manages, as typed JSON
 #   voxtype_cfg set k=str k:=json -k  set a string, set a typed JSON value, remove a key
 voxtype_cfg() {
-  python3 - "$VOXTYPE_CONFIG" "$@" <<'PY'
+  # Reads come from the snapshot vox_cache_load took (one Python start instead of one per value);
+  # any write drops it.
+  if [[ ${1:-} == get && $VOX_CACHE_LOADED == 1 ]]; then
+    printf '%s\n' "${VOX_CACHE[${VOX_SECTION:-whisper}.$2]-}"
+    return 0
+  fi
+  [[ ${1:-} == set ]] && VOX_CACHE_LOADED=0
+  "$PY" - "$VOXTYPE_CONFIG" "$@" <<'PY'
 import json, os, re, sys, tempfile, tomllib
 path, op, args = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3:]
 SECTION = os.environ.get("VOX_SECTION") or "whisper"
@@ -197,6 +206,34 @@ with os.fdopen(fd, "w") as f:
 os.chmod(tmp, os.stat(path).st_mode & 0o7777)
 os.replace(tmp, path)
 PY
+}
+
+# One read of Voxtype's [whisper] and [output] values for the rest of this command, in the main shell
+# so that $(voxtype_cfg get ...) subshells see it. Formatted like `voxtype_cfg get`.
+declare -A VOX_CACHE=()
+VOX_CACHE_LOADED=0
+vox_cache_load() {
+  VOX_CACHE=()
+  VOX_CACHE_LOADED=0
+  [[ -f $VOXTYPE_CONFIG ]] || return 0
+  local k v
+  while IFS= read -r -d '' k && IFS= read -r -d '' v; do VOX_CACHE[$k]=$v; done < <("$PY" - "$VOXTYPE_CONFIG" <<'PY'
+import os, sys, tomllib
+try:
+    with open(os.path.realpath(sys.argv[1]), "rb") as f:
+        config = tomllib.load(f)
+except (OSError, tomllib.TOMLDecodeError):
+    config = {}
+for section in ("whisper", "output"):
+    table = config.get(section, {})
+    for key, value in (table.items() if isinstance(table, dict) else []):
+        if isinstance(value, (dict, list)):
+            continue
+        text = str(value).lower() if isinstance(value, bool) else str(value)
+        sys.stdout.write(f"{section}.{key}\0{text.replace(chr(0), '')}\0")
+PY
+)
+  VOX_CACHE_LOADED=1
 }
 
 # Voxtype 1.1 renamed [whisper] backend to mode; when both are set, mode wins (tested with 1.1.1:
@@ -472,8 +509,35 @@ restart_server() {
 # Both come from files and a catalog amd-npu doesn't control, so only a plain positive whole number
 # is kept (anything else becomes null): they end up in comparisons, and Bash arithmetic would run
 # commands hidden in a string like "x[$(...)]" (HANCORE's review of 0.13.0).
+# FastFlowLM 1.0.9 opens the NPU in every command except `validate`, before it even looks at the
+# command (src/src/main.cpp), so `flm list` and `flm pull` would open it from a second process next
+# to the server. They run with the NPU hidden instead (it treats a missing NPU as normal for these),
+# and `flm list` output is kept in $XDG_RUNTIME_DIR until a model folder or flm itself changes.
+flm_hidden() {
+  if command -v bwrap >/dev/null; then
+    bwrap --dev-bind / / --tmpfs /dev/accel --tmpfs /sys/class/accel --die-with-parent -- flm "$@"
+  else
+    flm "$@"
+  fi
+}
+
+flm_list_json() {
+  local dir=${XDG_RUNTIME_DIR:-} sig cache tmp out
+  if [[ -n $dir && -d $dir && -O $dir ]]; then
+    sig=$({ stat -c '%Y %s' "$(command -v flm)" 2>/dev/null; find "$FLM_MODELS" -maxdepth 2 -printf '%T@ %s %p\n' 2>/dev/null | sort; } | md5sum | cut -c1-32)
+    cache="$dir/amd-npu-flm-list.$sig.json"
+    [[ -s $cache ]] && { cat "$cache"; return 0; }
+  fi
+  out=$(flm_hidden list --json 2>/dev/null) || true
+  if [[ -n ${cache:-} ]] && jq -e '.models | type == "array"' >/dev/null 2>&1 <<<"$out"; then
+    tmp=$(mktemp "$dir/.amd-npu-flm-list.XXXXXX") && printf '%s\n' "$out" >"$tmp" &&
+      rm -f "$dir"/amd-npu-flm-list.*.json && mv -f "$tmp" "$cache"
+  fi
+  printf '%s\n' "$out"
+}
+
 models_json() {
-  flm list --json 2>/dev/null | python3 -c '
+  flm_list_json | "$PY" -c '
 import json, os, re, sys
 def count(v):
     return v if type(v) is int and 0 < v < 100000000 else None
@@ -503,7 +567,7 @@ print(json.dumps(out, separators=(",", ":")))' "$FLM_MODELS" 2>/dev/null || echo
 model_info() { models_json | jq -c --arg m "$1" '.[] | select(.name == $m)'; }
 
 # The embedding model's catalog entry (models_json leaves it out on purpose).
-embed_info() { flm list --json 2>/dev/null | jq -c --arg m "$EMBED_MODEL" '.models[] | select(.name == $m) | {name, installed, footprint}'; }
+embed_info() { flm_list_json | jq -c --arg m "$EMBED_MODEL" '.models[] | select(.name == $m) | {name, installed, footprint}'; }
 embed_installed() { [[ $(embed_info | jq -r '.installed // false') == true ]]; }
 embed_enabled() { [[ $(env_get FLM_EMBED 0) == 1 ]]; }
 # Whisper, the embedding model and an LLM don't fit on the NPU together (the third model's hardware
@@ -659,11 +723,11 @@ cmd_enable() {
   step "Whisper model"
   # The sandboxed server can't download (and would hang trying), so missing models are fetched
   # here, after asking. A model whose files changed upstream also shows as not downloaded.
-  if flm list --json 2>/dev/null | jq -e --arg m "$WHISPER" '.models[] | select(.name == $m and .installed)' >/dev/null; then
+  if flm_list_json | jq -e --arg m "$WHISPER" '.models[] | select(.name == $m and .installed)' >/dev/null; then
     ok "$WHISPER present"
   else
     confirm "Download $WHISPER (~620 MB) from Hugging Face?" || die "Dictation needs $WHISPER."
-    flm pull "$WHISPER"
+    flm_hidden pull "$WHISPER"
   fi
 
   step "Service"
@@ -752,6 +816,7 @@ cmd_enable() {
 }
 
 cmd_status_json() {
+  vox_cache_load
   local service=inactive server=false proxy=inactive whisper_dl=false llm="" llm_info="null" port_ok=true stale=false
   local health released=false; health=$(npu_health)
   [[ -f $RELEASED ]] && released=true
@@ -789,13 +854,27 @@ last_latency() {
   journalctl --user -u voxtype.service --no-pager -n 200 2>/dev/null | grep -oP 'Remote transcription completed in \K[0-9.]+s' | tail -1 || true
 }
 
+# From the driver's sysfs attribute, which needs no device open. Older drivers without it: xrt-smi,
+# which does open the NPU, so its answer is kept for the rest of the boot.
 npu_firmware() {
+  local f v cache
+  for f in /sys/class/accel/accel*/device/fw_version; do
+    [[ -r $f ]] || continue
+    v=$(head -c 64 "$f" | tr -d '\n')
+    [[ $v =~ ^[0-9A-Za-z._-]+$ ]] && { echo "$v"; return 0; }
+  done
+  cache=${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/amd-npu-fw}
+  [[ -n $cache && -s $cache ]] && { cat "$cache"; return 0; }
   command -v xrt-smi >/dev/null || return 0
-  xrt-smi examine 2>/dev/null | grep -oP 'NPU Firmware Version\s*:\s*\K\S+' || true
+  v=$(xrt-smi examine 2>/dev/null | grep -oP 'NPU Firmware Version\s*:\s*\K\S+' | head -1 || true)
+  [[ -n $v ]] || return 0
+  [[ -n $cache ]] && printf '%s\n' "$v" >"$cache"
+  echo "$v"
 }
 
 cmd_status() {
   [[ ${1:-} == --json ]] && { cmd_status_json; return; }
+  vox_cache_load
   local ready=0
   step "AMD NPU status"
   if [[ $(port_owner "$PORT") == other ]]; then
@@ -850,7 +929,7 @@ cmd_status() {
 cmd_ping() {
   local wav body code
   wav=$(mktemp --suffix=.wav) body=$(mktemp)
-  python3 -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0'*16000); w.close()" "$wav"
+  "$PY" -c "import wave,sys; w=wave.open(sys.argv[1],'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0'*16000); w.close()" "$wav"
   code=$(curl -s -m 60 -o "$body" -w '%{http_code} %{time_total}' "$URL/v1/audio/transcriptions" -F "file=@$wav" -F "model=$WHISPER" || true)
   # With Whisper off the server still answers 200, with a body of `null`.
   if [[ ${code%% *} == 200 ]] && jq -e 'type == "object" and has("text")' "$body" >/dev/null 2>&1; then
@@ -864,6 +943,7 @@ cmd_ping() {
 }
 
 cmd_doctor() {
+  vox_cache_load
   cmd_check || true
   cmd_status || true
   local fail=0
@@ -950,7 +1030,7 @@ cmd_pull() {
   [[ -n $info ]] || die "'$m' isn't an NPU LLM FastFlowLM knows (or $EMBED_MODEL). See: amd-npu models"
   if [[ $(jq -r .installed <<<"$info") == true ]]; then ok "$m is already downloaded"; return; fi
   confirm "Download $m (~$(jq -r .footprint <<<"$info") GB in memory once loaded)?" || exit 1
-  flm pull "$m"
+  flm_hidden pull "$m"
   refresh_widget
 }
 
@@ -1078,7 +1158,7 @@ cmd_chat() {
   [[ -n $m ]] || die "No model loaded. Load one first (amd-npu load <model>) or name it: amd-npu chat <model>"
   require_downloaded_llm "$m"
   [[ $m == "$(loaded_llm)" ]] || { npu_guard; cmd_load "$m" >/dev/null; }
-  python3 "$ROOT/lib/chat.py" "$URL" "$m" "$think"
+  "$PY" "$ROOT/lib/chat.py" "$URL" "$m" "$think"
 }
 
 # Measures the loaded LLM: prints human text, or "ok <prefill> <decode> <tokens>" with --raw.

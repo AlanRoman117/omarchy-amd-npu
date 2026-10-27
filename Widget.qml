@@ -27,6 +27,7 @@ Panel {
   property string status: "unsupported"
   // Card details, from `amd-npu status --json`.
   property var info: ({})
+  property string infoText: ""
   // "", "switch", "load", "unload", "share"
   property string busy: ""
   property bool testingNpu: false
@@ -81,7 +82,9 @@ Panel {
   // waits for it. The proxy reports that (/amd-npu/queue), checked every half second while
   // transcribing, so the overlay can say so instead of a "Transcribing..." that looks stuck.
   property bool dictationWaiting: false
-  readonly property bool peakWatching: recording && peakArmed && !micLocked && silenceWarnSec > 0 && !!micSource
+  // Only the widget on the focused monitor shows the countdown, so only it watches the mic level
+  // (one capture stream instead of one per screen).
+  readonly property bool peakWatching: recording && peakArmed && onFocusedMonitor && !micLocked && silenceWarnSec > 0 && !!micSource
   readonly property string cardConfigDir: configHome + "/amd-npu"
   onMicSourceChanged: micSinceMs = Date.now()
 
@@ -124,10 +127,11 @@ Panel {
   // ::, ::1 or ::ffff:127.0.0.1; port hex CD91). It would receive the audio and choose the text
   // Voxtype types, so this is checked before anything talks to it.
   // "stuck": one of this user's threads is asleep inside the NPU driver. "released": `amd-npu release`.
-  readonly property string probe: "systemctl --user cat amd-npu.service >/dev/null 2>&1 || { " + quote(cli) + " setup-state; exit; }; " +
-    "ps -L -u \"$(id -u)\" -o stat=,wchan:40= 2>/dev/null | awk '$1 ~ /^D/ && $2 ~ /^(amdxdna|aie2|xdna|rpm_resume)/ { f = 1 } END { exit !f }' && { echo stuck; exit; }; " +
+  // Every 15 s per screen, so it avoids extra processes: bash's own $UID, and a file test for the unit.
+  readonly property string probe: "[ -f \"${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/amd-npu.service\" ] || { " + quote(cli) + " setup-state; exit; }; " +
+    "ps -L -u \"$UID\" -o stat=,wchan:40= 2>/dev/null | awk '$1 ~ /^D/ && $2 ~ /^(amdxdna|aie2|xdna|rpm_resume)/ { f = 1 } END { exit !f }' && { echo stuck; exit; }; " +
     "[ -f \"${XDG_CONFIG_HOME:-$HOME/.config}/amd-npu/released\" ] && { echo released; exit; }; " +
-    "awk -v u=\"$(id -u)\" 'FNR > 1 && $4 == \"0A\" && $8 != u && $2 ~ /^(0100007F|00000000|00000000000000000000000000000000|00000000000000000000000001000000|0000000000000000FFFF00000100007F):CD91$/ { f = 1 } END { exit !f }' /proc/net/tcp /proc/net/tcp6 2>/dev/null && { echo foreign; exit; }; " +
+    "awk -v u=\"$UID\" 'FNR > 1 && $4 == \"0A\" && $8 != u && $2 ~ /^(0100007F|00000000|00000000000000000000000000000000|00000000000000000000000001000000|0000000000000000FFFF00000100007F):CD91$/ { f = 1 } END { exit !f }' /proc/net/tcp /proc/net/tcp6 2>/dev/null && { echo foreign; exit; }; " +
     "if systemctl --user is-active --quiet amd-npu.service && " +
     "[ \"$(curl -s --noproxy '*' -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:52625/api/version)\" = 200 ]; " +
     "then echo ready; else echo stopped; fi"
@@ -321,7 +325,10 @@ Panel {
       if (!n || n.isSink || n.isStream || n.name === "quickshell") continue
       if (n.audio || String(n.type || "").indexOf("Source") >= 0) list.push(n)
     }
-    micInputs = list
+    // Same inputs as before: keep the list, so the picker's buttons aren't recreated every 2 s.
+    var same = list.length === micInputs.length
+    for (var j = 0; same && j < list.length; j++) same = list[j] === micInputs[j]
+    if (!same) micInputs = list
   }
 
   // Same as Omarchy's audio panel: Voxtype follows the default at the next recording.
@@ -523,7 +530,10 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try { root.info = JSON.parse(String(text || "{}")) } catch (e) { }
+        // Unchanged status: keep the old object, so the card's bindings and lists aren't rebuilt.
+        var raw = String(text || "{}")
+        if (raw === root.infoText) return
+        try { root.info = JSON.parse(raw); root.infoText = raw } catch (e) { }
       }
     }
   }

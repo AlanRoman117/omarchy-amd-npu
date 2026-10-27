@@ -246,7 +246,7 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   `amd-npu-proxy.service` (the API on `127.0.0.1:52625`, running `~/.local/share/amd-npu/proxy.py`) and
   `amd-npu-proxy.socket`, which keeps port 52625 bound for your account through every restart and
   while the NPU is released (systemd hands it to the proxy).
-  Both are sandboxed: read-only system and home (FastFlowLM can't write its models folder), private
+  All are sandboxed: read-only system and home (FastFlowLM can't write its models folder), private
   `/tmp`, no extra privileges or capabilities, and a system-call filter; `systemd-analyze --user
   security amd-npu` rates them 1.8 ("OK"). Settings live in `~/.config/amd-npu/server.env` (which
   model, Whisper on or off, context length, allowed browser origins) and `card.json` (the silence
@@ -272,6 +272,12 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   Omarchy's audio panel; nothing changes unless you pick one.
 
 ## Good to know
+
+- **Battery:** with the card closed, everything this plugin runs costs well under 0.1 W (a status
+  check every 15 s, the proxy and FastFlowLM idle), and the NPU sleeps when it isn't transcribing or
+  answering. The card's status checks don't wake the NPU: the firmware version comes from the
+  driver's sysfs file, and `flm list` runs with the NPU hidden from it (FastFlowLM 1.0.9 opens the NPU
+  for almost every command, even listing models). The proxy has no device access at all.
 
 - **The NPU server holds the NPU exclusively.** Other NPU tools (`flm run`, Lemonade) need the NPU
   released first (switch it off, or `amd-npu release`).
