@@ -16,7 +16,7 @@ see `to-do.md`. Renamed from `omarchy-npu-dictation` in 0.2.0.
 | `Widget.qml` | Bar icon + popup card, built on Omarchy's `Panel` + `KeyboardPanel` (same pattern as `plugins/panels/power/Panel.qml`). IPC target `alanroman117.amd-npu`: `open`, `close`, `toggle`, `refresh`, `chat`. Chat opens a plain floating terminal (`xdg-terminal-exec --app-id=org.omarchy.terminal`), not `omarchy-launch-floating-terminal-with-presentation`, whose logo and "press any key" don't suit a chat |
 | `bin/amd-npu` | Setup, dictation and model commands (`amd-npu help`) |
 | `lib/chat.py` | Terminal chat, stdlib only (its own file because an interactive script can't read the terminal if its code comes in on stdin). Turns readline's bracketed paste back on (Python disables it), so a multi-line paste is one message; test with a pty sending `ESC[200~...ESC[201~` |
-| `systemd/amd-npu.service` | FastFlowLM on `127.0.0.1:6669` (a browser "bad port"), `--cors 0`. Reads `%E/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`, `FLM_EMBED`); `%E` = `$XDG_CONFIG_HOME`, which FastFlowLM also uses. Sandboxed (0.8.0): `PrivateUsers`, read-only models dir, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`, `SystemCallFilter=@system-service`, empty capability set, `RestrictAddressFamilies`, `ProtectProc=invisible` and more; both units score 1.8 in `systemd-analyze --user security`. FastFlowLM writes nothing in `$HOME` at runtime. `Wants=` the proxy |
+| `systemd/amd-npu.service` | FastFlowLM on `127.0.0.1:6669` (a browser "bad port"), `--cors 0`. Reads `%E/amd-npu/server.env` (`FLM_LLM`, `FLM_ASR`, `FLM_CTX`, `FLM_EMBED`); `%E` = `$XDG_CONFIG_HOME`, which FastFlowLM also uses. Sandboxed (0.8.0): `PrivateUsers`, read-only models dir, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`, `SystemCallFilter=@system-service`, empty capability set, `RestrictAddressFamilies`, `ProtectProc=invisible` and more; the server scores 1.8 and the proxy 1.6 (0.14.0 added `PrivateDevices=yes`) in `systemd-analyze --user security`. FastFlowLM writes nothing in `$HOME` at runtime. `Wants=` the proxy |
 | `lib/proxy.py` + `systemd/amd-npu-proxy.service` | The public API on `127.0.0.1:52625`. `enable` copies `proxy.py` to `~/.local/share/amd-npu/`. Default-deny: only the exact method+path pairs in `ROUTES` are forwarded (`/api/pull`, `/load`, `/api/cancel`, `/api/npu/status` are refused); non-plain targets (`%`, trailing `/`, absolute form) get 400 (Python itself collapses a leading `//`). Refuses foreign `Origin`/`Sec-Fetch-Site` (allowlist `AMD_NPU_ALLOWED_ORIGINS`, `*` ignored), bad `Host`, non-JSON bodies on JSON endpoints, models that aren't downloaded (JSON `model` and `name`; multipart must have at most one real `model` field), duplicate/negative/CL+TE lengths. Sets Content-Length itself, 60 s per whole request, 16 concurrent requests (taken after the request arrives), and authenticates every connection it opens to 6669 (0.12.1, HANCORE's second note on 3a5bff5): it connects first, then requires the server end of that exact TCP 4-tuple (local 127.0.0.1:6669, remote our ephemeral port, ESTABLISHED, exactly one) to be this UID in `/proc/net/tcp`, retrying ~50 ms while the accepted socket settles, and only then sends the request (`upstream_connection_owned`). The old 5 s cached listener check left a window where FastFlowLM could exit and another account bind 6669. No cache: ~1 ms per request. Refuses a JSON `backend` key (FastFlowLM 1.0.9). `PartOf=amd-npu.service`; since 0.12.0 it takes its listening socket from `amd-npu-proxy.socket` (fd 3) and binds itself only when started without it |
 | `systemd/amd-npu-proxy.socket` | Holds 127.0.0.1:52625 for this account (`WantedBy=sockets.target`) so the port is never free between proxy/server restarts or while released. `enable` migrates (stops the old proxy, `enable --now` the socket); `disable` lets it go |
 | `lib/dictation-guard.py` | Voxtype's `[output] pre_recording_command`, copied to `~/.local/share/amd-npu/`: cancels the recording (`voxtype record cancel`) and notifies when Voxtype is in remote mode at our URL and 52625's listener isn't this UID. Stdlib only |
@@ -179,7 +179,33 @@ because only NPU dictations are counted.
   `voxtype record start`: the log shows "pre_recording hook failed ... port 52625 is none" and the
   state is idle at once. Restart the socket after.
 - **`enable` doesn't run `flm validate` while the server is up** (it opens the NPU from a second
-  process). The running server proves driver, firmware and memlock; firmware comes from `xrt-smi`.
+  process). The running server proves driver, firmware and memlock; firmware comes from sysfs (`fw_version`, 0.14.0).
+- **Status paths must not open the NPU (0.14.0, power study 2026-10-27).** FastFlowLM 1.0.9 opens the NPU
+  in *every* command except `validate`, before looking at the command (`src/src/main.cpp` 664-670), so a
+  plain `flm list` is a second process on the NPU; so is `xrt-smi examine`. The card's 5 s `status --json`
+  did both (2-3 `flm list` + `xrt-smi`), which woke the NPU every time (autosuspend is 5 s, so it never
+  slept with the card open). Now: firmware from `/sys/class/accel/accel*/device/fw_version` (xrt-smi only
+  as a once-per-boot fallback), `flm list`/`flm pull` via `flm_hidden` (bwrap with `/dev/accel` and
+  `/sys/class/accel` hidden; FastFlowLM treats a missing NPU as normal for these), `flm list` output cached
+  in `$XDG_RUNTIME_DIR` keyed on the flm binary and `find $FLM_MODELS -maxdepth 2` mtimes/sizes, and the
+  proxy unit has `PrivateDevices=yes` (its downloaded-model check runs `flm list`). Check with
+  `cat /sys/class/accel/accel0/device/power/{runtime_status,runtime_active_time}` around a status call: it
+  must stay `suspended` with an unchanged active time. Measured: status --json 0.47 s / 206 processes ->
+  0.13 s / 119; card open 25 s with 0 ms NPU activity.
+- **Cheap status (0.14.0):** `vox_cache_load` reads Voxtype's [whisper] and [output] once (NUL-separated,
+  one Python start) for `status`, `status --json` and `doctor`; `voxtype_cfg get` serves from it until a
+  `set`. Call it in the main shell, not inside `$(...)`, or the snapshot is lost. It holds only the keys in its
+  `KEYS` list (security review: a quoted TOML key with `\u0000` could otherwise shift the NUL-separated
+  stream): add any new key `voxtype_cfg get` reads there, or it reads as empty. Python runs with `-I`
+  (`PYI`), so a `json.py` in the current directory isn't imported. Python runs as
+  `/usr/bin/python3` (`$PY`): the user's PATH puts mise shims first, doubling processes per call. The
+  dictation guard's hook keeps `python3` (changing it would rewrite users' Voxtype configs for ~7 ms).
+- **Idle cost, for proportion (2026-10-27):** card closed, everything the plugin runs is <10 mW (quickshell
+  0.17% of a core, flm 10 ms CPU/min, proxy wake-ups ~0 since `serve_forever(poll_interval=3600)`; the bar
+  check is 10 processes every 15 s per screen). The card skips reassigning `info`/`micInputs` when
+  nothing changed, and only the focused screen's widget watches the mic level. Not possible: journald
+  `LogFilterPatterns=` for FastFlowLM's ~10 noise lines per request ("only available in system services,
+  not in per-user services", systemd 262). Outside the plugin, voxtype-osd-gtk4 idles at ~0.8% of a core.
 - **Never let outside data reach Bash arithmetic** (HANCORE's Medium on 0.13.0, b70c61c): `(( ))`,
   `$(( ))` and the numeric tests in `[[ ]]` (`-lt`, `-le`, `-gt`, ...) evaluate their operands as
   arithmetic, and an array subscript in a string like `HOME[$(cmd)]` runs `cmd` (reproduced: a model

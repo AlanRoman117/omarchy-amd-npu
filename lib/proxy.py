@@ -501,7 +501,9 @@ def main():
         sys.stderr.write("AMD_NPU_ALLOWED_ORIGINS: '*' ignored (it would let every website use the API)\n")
     sys.stderr.write(f"amd-npu proxy on {LISTEN_HOST}:{LISTEN_PORT}{' (port held by systemd)' if inherited else ''} -> {UPSTREAM_HOST}:{UPSTREAM_PORT}; "
                      f"allowed origins: {' '.join(sorted(ALLOWED_ORIGINS)) or 'none'}\n")
-    server.serve_forever()
+    # Nothing calls shutdown() (systemd stops it with SIGTERM), so the loop needn't wake every
+    # 0.5 s (CPython's default) to check for it.
+    server.serve_forever(poll_interval=3600)
 
 
 if __name__ == "__main__":

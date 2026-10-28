@@ -19,6 +19,9 @@ PrivateUsers=yes
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
+# The proxy needs no devices. Its `flm list` (the downloaded-model check) then can't open the NPU
+# next to the server, which FastFlowLM 1.0.9 otherwise does for every command.
+PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
