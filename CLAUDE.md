@@ -37,7 +37,7 @@ unless told otherwise, so `unload`, `resume` and `enable` don't drop it.
 - The maintainer's Voxtype config has **no `[osd]` section** (default `top_margin` 0.85) since
   0.6.0; the countdown positions itself.
 - The maintainer's Z13 normally runs **Whisper only** (`FLM_LLM=` empty), with Voxtype on the NPU.
-  `qwen3.5:4b`, `gemma4-it:e4b` (its flash twin comes with it) and `gemma4-it:12b` are downloaded for testing (`qwen3.5:0.8b` and `gemma4-it:e2b` were removed 2026-10-21; `~/Work/npu-lab/battery/session.sh` still loads `qwen3.5:0.8b`, so re-pull it before rerunning Test A).
+  Only `gemma4-it:12b` is downloaded for testing (the others, last `qwen3.5:4b` and `gemma4-it:e4b`, were removed by 2026-11-12; `~/Work/npu-lab/battery/session.sh` still loads `qwen3.5:0.8b`, so re-pull it before rerunning Test A).
 - The installed plugin (`~/.config/omarchy/plugins/alanroman117.amd-npu/`) is a git clone of the
   public `main`. Keep it in sync after a merge with `omarchy plugin update alanroman117.amd-npu`.
   If `Widget.qml` changed, also run `omarchy restart shell`.
@@ -396,6 +396,28 @@ because only NPU dictations are counted.
   NPU. A pacman upgrade doesn't restart the running daemon: check
   `systemctl --user show voxtype -p ActiveEnterTimestamp` against the upgrade time before trusting
   "it still works".
+- **Voxtype 1.2.1 (checked 2026-11-12, voxtype-bin 1.2.1-2).** Our managed keys read the same
+  (`voxtype config get <key>` takes one key per call); dictation, the guard and doctor all passed
+  after a daemon restart. What's new that touches us:
+  - **Settings panel.** The daemon links `io.voxtype.settings` into `~/.config/omarchy/plugins` on
+    start (opt out: `[omarchy] link_settings_plugin = false`; status: `voxtype setup omarchy --status`).
+    It edits every schema key through `voxtype config set`, including `whisper.mode`,
+    `remote_endpoint`, `remote_model` and `output.pre_recording_command`, so a user can undo our
+    setup from there. The card and doctor catch that as they do a hand edit. `config set` writes by
+    atomic replace, as `voxtype_cfg set` does, and the card's `FileView` follows it. The link logs
+    `PluginRegistry.setEnabled: unknown plugin io.voxtype.settings` and qmlscanner "outside of the
+    config folder" warnings: Voxtype's, not ours.
+  - **Meeting mode** (`voxtype meeting start`, `[meeting] enabled = false` by default) uses the same
+    transcriber (`create_transcriber` in `src/meeting/mod.rs`), so on our config it sends 30 s chunks
+    to 52625, the mic and loopback tracks separately. It never runs `pre_recording_command` (only
+    the push-to-talk and streaming starts in `src/daemon.rs` do), so **the dictation guard doesn't
+    cover meetings**: the socket unit is the only protection there. Each chunk also takes a turn on
+    the NPU like a dictation. Diarization (`simple`, or `ml` with an ONNX model) runs on the CPU,
+    and summaries go to Ollama or a remote API, not to us. Nothing to expose on the card; if a
+    user asks, the README can say meetings are transcribed on the NPU too.
+  - **Model upgrade offers** (`voxtype setup migrate --json`, read-only) are for local models only;
+    there were none on our remote config. Accepting one switches engine and model in one write;
+    untested whether that leaves remote mode alone, so run doctor after one.
 - **F9 toggle (0.11.0).** `hypr/amd-npu-f9-toggle.lua` (`hl.unbind("F9")` + `o.bind("F9", …,
   "voxtype record toggle")`) is copied to `~/.local/state/omarchy/toggles/hypr/`, which Omarchy's
   `default/hypr/toggles.lua` loads after the defaults and the user's bindings (the
