@@ -179,7 +179,7 @@ because only NPU dictations are counted.
   `python3 <path>/dictation-guard.py; ` so a user's own hook survives. Test the cancel path by
   stopping the socket (`systemctl --user stop amd-npu-proxy.socket amd-npu-proxy.service`), then
   `voxtype record start`: the log shows "pre_recording hook failed ... port 52625 is none" and the
-  state is idle at once. Restart the socket after.
+  state is idle ~50 ms after the hook (0.15.0; it was 2 s before, see Voxtype 1.3.0). Restart the socket after.
 - **`enable` doesn't run `flm validate` while the server is up** (it opens the NPU from a second
   process). The running server proves driver, firmware and memlock; firmware comes from sysfs (`fw_version`, 0.14.0).
 - **Status paths must not open the NPU (0.14.0, power study 2026-10-27).** FastFlowLM 1.0.9 opens the NPU
@@ -279,7 +279,10 @@ because only NPU dictations are counted.
   top of the screen (0.78 → y 780 on a 1000 px high screen). The countdown goes 8 px above it, or
   below it if there's no room; for a corner position, or `[osd] enabled = false`, it takes Omarchy's
   OSD spot (`Style.space(67)` from the bottom). Only the bar instance on `Hyprland.focusedMonitor`
-  shows it.
+  shows it. 0.15.0: `height_px` is only the GTK4 overlay's; with Voxtype's Quickshell overlay (default
+  since 1.2.2) the card is 72 px, picked by reading `$XDG_RUNTIME_DIR/voxtype/osd_frontend`
+  (`Widget.qml:641`, `voxHeight` at :744). `top-center` with `top_margin` > 0.5 is mirrored like
+  Voxtype does: `y = H * (1 - f) - height`.
 - **Microphone (`Widget.qml`, 0.7.0):** Voxtype's `[audio] device = "default"` (also `pipewire`,
   `pulse`) follows the system default input at record time, so the card shows
   `Pipewire.defaultAudioSource` and the picker sets the default exactly like Omarchy's audio panel
@@ -376,7 +379,9 @@ because only NPU dictations are counted.
   - **Test rule: never open `/dev/accel/accel0` from a second process to "test" any of this.** Fake the
     inputs instead (stub `ps`/`journalctl`, `NPU_NODE_GLOB` pointed at a temp file held by a `sleep`),
     as the 0.9.0 tests did.
-- **Waveform after monitor changes (0.9.1).** `voxtype-osd-gtk4` positions itself once, from the
+- **Waveform after monitor changes (0.9.1; GTK4 overlay and pre-1.2.2 only).** Voxtype's Quickshell
+  overlay (1.2.2+) makes one surface per output and re-places itself live, so the restart below matches
+  nothing there and is just a safety net. `voxtype-osd-gtk4` positions itself once, from the
   screen it started on. On 2026-10-11 it started with HDMI connected; after unplugging, the laptop
   screen (1280x800 logical at 320,1080) got the waveform at y 2024, off-screen. `Widget.qml` keeps a
   `screensSig` (each screen's name and size). A change, after a 3 s debounce and only on the widget
@@ -416,10 +421,77 @@ because only NPU dictations are counted.
     cover meetings**: the socket unit is the only protection there. Each chunk also takes a turn on
     the NPU like a dictation. Diarization (`simple`, or `ml` with an ONNX model) runs on the CPU,
     and summaries go to Ollama or a remote API, not to us. Nothing to expose on the card; if a
-    user asks, the README can say meetings are transcribed on the NPU too.
+    user asks, the README says meetings are transcribed on the NPU too (see Voxtype 1.3.0).
   - **Model upgrade offers** (`voxtype setup migrate --json`, read-only) are for local models only;
     there were none on our remote config. Accepting one switches engine and model in one write;
     untested whether that leaves remote mode alone, so run doctor after one.
+- **Voxtype 1.3.0 (checked 2026-11-21).** Findings from the validation round; the work, evidence and
+  reviews are in `~/Work/npu-lab/bench/voxtype13/`. All of it is handled in 0.15.0 unless noted.
+  - **Engine bypass.** A top-level `engine` other than whisper makes Voxtype ignore `[whisper]`
+    (also `VOXTYPE_ENGINE`, `transcribe --engine`, `record start --model <other engine's model>`;
+    `secondary_model` only works with the built-in hotkey; profiles can't bypass). A missing,
+    unknown or unreadable engine means whisper. So two predicates (`bin/amd-npu:282-299`):
+    `voxtype_points_here` = `[whisper]` sends to our URL, `voxtype_on_npu` = that and engine whisper.
+    The guard stays on `points_here` on purpose: with another engine a whisper `--model` override
+    still sends to 52625, so a guard no-op would open a hole (rejected). Also rejected: forcing
+    `[whisper] model = large-v3-turbo`, which breaks CPU-model mode (only base.en is local).
+    `enable` switches the engine with a consent line and saves it to `original-engine.json`;
+    `disable` restores it only if the engine is still whisper (`voxtype_engine_restore`, :321).
+    `voxtype_cfg` handles top-level keys with `VOX_SECTION=.` (insert before the first `[table]`; a
+    key appended after a table lands inside it and Voxtype ignores it). `status --json` has `onNpu`
+    and `engine`; the card uses `onNpu`, which also fixes it showing READY for any remote server.
+  - **Config salvage.** Voxtype loads each top-level table separately; any serde failure (wrong
+    type, unknown enum value, also in `[output.notification]`) resets that whole table to defaults.
+    Unknown keys are fine, syntax errors are fatal. A bad `[output]` drops `pre_recording_command`
+    while `[whisper]` still sends to 52625, and `guard_installed` (file only, on purpose: making it
+    effective-aware would make "Apply plugin update" loop) still says yes. `guard_effective` asks
+    `RUST_LOG=off voxtype -q -c "$VOXTYPE_CONFIG" config get output.pre_recording_command`: 1.3 logs
+    its WARN lines to **stdout**, so without both flags another dropped section breaks the match.
+    `null` = dropped (`guardIgnored`), failure or empty output = unknown (never red). There is no
+    `config validate`. `config get` uses the same loader as the daemon. `voxtype config set` refuses
+    bad values (rc 2) but replaces a symlinked config with a regular file, so we never shell out to
+    it. Hand edits and upgrades are the risk.
+  - **Guard speed.** `voxtype record cancel` blocks ~2 s: the CLI waits for the daemon to
+    acknowledge, and the daemon is blocked awaiting our hook (`CANCEL_ACK_TIMEOUT` 2 s, hooks have no
+    timeout). `lib/dictation-guard.py:69-94` now starts the cancel without waiting and polls for
+    `$XDG_RUNTIME_DIR/voxtype/cancel` (10 ms steps, up to 1 s): the trigger file on disk is what makes
+    the cancel win over a queued stop, so don't fire and forget. Idle ~50 ms instead of 2.08 s.
+    `notify-send` has `timeout=2`. Voxtype's own "hook failed" notice is late and misworded.
+  - **`-c` and temp daemons.** `-c <missing file>` silently gives built-in defaults (an item-4 test
+    ran on defaults and transcribed on the CPU, nothing sent). The CLI and the daemon resolve `-c`
+    separately, and temp daemons share `$XDG_RUNTIME_DIR/voxtype`. The guard reads the real config,
+    never `-c`. Don't test with a temp config unless the file exists.
+  - **Meetings** (`src/meeting/mod.rs:1073`): chunk transcription is synchronous and blocks the
+    daemon's main loop, so push-to-talk started 6 s late (the start was lost) and SIGTERM is ignored
+    while finalizing. The state file stays `idle` (read `meeting_state` or `status --extended`), so the
+    card is honest but blind. `dictationWaiting` fires for meeting chunks: one waited 52 s behind a
+    53 s answer, no loss; a wait over ~177 s fails a chunk. Two requests per 30 s, ~7.3 s of NPU time.
+    `meeting start` downloads GTCRN (536 KB) even with `echo_cancel = disabled`. `meeting_state` can
+    stay `finalizing` after a killed daemon. The doctor/status warning (`meeting.enabled`) doesn't set
+    `ready=1`.
+  - **eager / streaming / VAD.** `eager_processing`: 3 requests per 12 s (at +5 s, +10 s and the
+    tail), 6.75 s of NPU time vs 2.77 s, a failed chunk is dropped without notice or failed-audio, no
+    in-flight cap (the proxy returns 503 past `MAX_REQUESTS` 16); doctor notes it when on.
+    `streaming` does nothing on the NPU; in CPU-model mode the state file reads `streaming` (the card
+    counts it as recording, `Widget.qml:98`). VAD: the Energy fallback works and silence sends 0
+    requests, but noise passes (floor 0.001) and can hallucinate; `voxtype doctor` shows an ERROR
+    anyway (`backend = "energy"` silences it). Whether FastFlowLM honours `language` is open (needs a
+    non-English clip).
+  - **Quickshell overlay (default since 1.2.2).** Supervised child is `qs`; never match
+    `voxtype-osd-qui` (the theme follower, which nothing respawns), and `pkill -x voxtype-osd-gtk`
+    matches nothing. `osd_frontend` in the runtime dir names the frontend; the compact card is 72 px
+    whatever `height_px` says. Measured at scale 1 and 1.25: the countdown sits 8 px above, as
+    computed. The chip ("whisper · base.en", the local model key, not the NPU model) draws inside the
+    countdown card's bottom padding for ~1.8 s at each start. Cosmetic; no clearance added. The OSD
+    child can outlive the daemon.
+  - **Restore group rule** (`voxtype_restore`, :401). `[whisper]` mode, backend, endpoint, model and
+    timeout restore as one group, and only if the file's `remote_endpoint` is still `$URL`;
+    otherwise it's left alone and the saved originals are dropped. Keys the user changed after enable
+    (current is neither ours nor the original) are named; "ours" for mode is `local` when
+    `$VOX_EXCLUSIVE` exists. Not done yet: `disable`/`enable` restart Voxtype twice (one is enough),
+    and our own endpoint can be recorded as the "original" (old installs hold `mode local` plus our
+    endpoint). The card follows `voxtype config set` edits live; whether the daemon applies a new
+    `max_duration_secs` without a restart is untested.
 - **F9 toggle (0.11.0).** `hypr/amd-npu-f9-toggle.lua` (`hl.unbind("F9")` + `o.bind("F9", …,
   "voxtype record toggle")`) is copied to `~/.local/state/omarchy/toggles/hypr/`, which Omarchy's
   `default/hypr/toggles.lua` loads after the defaults and the user's bindings (the
@@ -468,7 +540,8 @@ because only NPU dictations are counted.
   the warning state, temporarily lower `max_duration_secs` in the file. The card re-reads it, but
   the running daemon keeps its old limit until restarted, so it won't auto-stop and type. To test
   placement, add a temporary `[osd]` block (`top_margin = 0.5`; `position = "top-center"` with
-  `top_margin = 0.05`; `position = "bottom-right"`), restart Voxtype, then `record start` and
+  `top_margin = 0.05`; `top_margin = 0.85` with `position = "top-center"`, the mirrored case;
+  `position = "bottom-right"`), restart Voxtype, then `record start` and
   `cancel`, and restore the file.
 - **`lib/proxy.py` runs from `~/.local/share/amd-npu/`**, not the repo: re-run `amd-npu enable` after
   changing it.

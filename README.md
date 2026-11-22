@@ -204,10 +204,15 @@ The countdown places itself just above Voxtype's waveform, wherever Voxtype's `[
 it (below it if the waveform is near the top, Omarchy's usual overlay spot if it's in a corner), so
 nothing needs moving. With more than one monitor it shows on the focused one, like the waveform.
 
-Voxtype works out where to draw its waveform once, from the screen it started on, so after you plug
-in or unplug a monitor it can end up off-screen. The card notices screen changes and restarts
-Voxtype's waveform overlay (only while you're not dictating; Voxtype brings it back within a
-second or two). To do it by hand: `omarchy-shell alanroman117.amd-npu fixWaveform`.
+Voxtype 1.2.2 and later draws its waveform with Quickshell, which follows your monitors by itself, so
+nothing needs fixing there. Older Voxtype (or its GTK4 overlay) works out where to draw once, from the
+screen it started on, so after you plug in or unplug a monitor it can end up off-screen. For that the
+card notices screen changes and restarts the waveform overlay (only while you're not dictating;
+Voxtype brings it back within a second or two). To do it by hand:
+`omarchy-shell alanroman117.amd-npu fixWaveform`.
+
+Voxtype's overlay shows a chip like "whisper · base.en" for a moment when you start. That's the name of
+its CPU fallback model; the NPU runs whisper-v3:turbo.
 
 Recording and transcribing states are also shown by Omarchy's built-in dictation indicator.
 
@@ -233,7 +238,7 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | `amd-npu resume` | Brings Whisper back on the NPU and dictation with it |
 | `amd-npu hide-npu <command>` | Runs a program with the NPU hidden from it, e.g. a ROCm app (see below) |
 | `amd-npu f9 toggle` / `hold` | Tap F9 to start and tap again to stop, or back to holding it (Omarchy's default); the card's **F9** row does the same |
-| `amd-npu disable` | Puts Voxtype's own `[whisper]` settings back, removes the dictation guard and stops the server (frees the NPU and port 52625) |
+| `amd-npu disable` | Puts Voxtype's `[whisper]` settings (and engine) back if they're still the ones `enable` set, removes the dictation guard and stops the server (frees the NPU and port 52625) |
 | `amd-npu remove` | `disable` + delete the services; asks before deleting models, settings, old backups, packages and the memlock setting |
 
 ## What it changes on your system
@@ -259,10 +264,16 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   `mode`; `mode` wins when both are present. amd-npu writes `mode`, removes `backend`, and renames
   it on `enable` if your config still has it.) Your original values and the first and
   latest copies of the file are kept in `~/.config/amd-npu/voxtype/`, and `disable`/`remove` put
-  the originals back. Edits are atomic and follow a symlinked config (dotfile managers keep working).
+  the originals back, as long as `[whisper]` still points at the NPU. If you've pointed Voxtype
+  somewhere else since, `[whisper]` is left as you set it; if you changed some values after `enable`,
+  they go back to your earlier ones and the command names them (the previous file is kept as
+  `config.toml.latest`). Every other key is kept. Edits are atomic and follow a symlinked config (dotfile managers keep working).
   `[output]` gets `pre_recording_command = "python3 ~/.local/share/amd-npu/dictation-guard.py"` (the
   dictation guard, see [Good to know](#good-to-know)); if you already had a command there, it's kept and
   runs after the guard, and `disable`/`remove` take only the guard out.
+  If your config selects another speech engine (`engine = "parakeet"`, say), Voxtype ignores
+  `[whisper]` entirely, so `enable` shows `engine = "whisper"` as part of the change, and `disable`
+  puts your engine back if it's still Whisper.
 - **F9 mode,** only when you pick **Tap to toggle**: one file,
   `~/.local/state/omarchy/toggles/hypr/amd-npu-f9-toggle.lua`, which unbinds Omarchy's two F9
   push-to-talk bindings and binds F9 to `voxtype record toggle`. Omarchy loads that folder after your
@@ -295,6 +306,33 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   (`--force` overrides), and the card warns about it.
 - **If the server is stopped, dictation fails** until it's started again, or you release the NPU
   (dictation then uses Voxtype's CPU model).
+- **Some Voxtype settings bypass the NPU.** `enable` makes Whisper the engine, but these still run
+  somewhere else: `voxtype record start --model <another engine's model>`, `whisper.secondary_model`
+  with Voxtype's own hotkey, `voxtype meeting start --engine/--model`, and the `VOXTYPE_ENGINE`
+  environment variable. `amd-npu doctor` and the card say "dictation doesn't use the NPU" when the
+  engine isn't Whisper.
+- **Voxtype's meeting mode uses the NPU too** (`[meeting] enabled`, `voxtype meeting start`).
+  - Each 30 seconds of a meeting is two requests (microphone and the other side), about 7 seconds of
+    NPU time.
+  - The dictation guard doesn't run for meetings (Voxtype has no hook for them), so `amd-npu doctor`
+    warns about it; `amd-npu-proxy.socket` still holds the port for your account.
+  - Meeting chunks wait behind a model's answer like dictation does, and a wait of more than about 3
+    minutes fails a chunk.
+  - Push-to-talk during a meeting can start late: wait for the indicator before you speak.
+  - The card doesn't show meetings.
+  - Starting a meeting downloads Voxtype's 536 KB echo model, even with echo cancelling off.
+- **Leave these Voxtype settings as they are.**
+  - `eager_processing` (off): about one extra NPU request per 5 seconds while you talk, and a failed
+    chunk silently drops that part of your text. `amd-npu doctor` says so if it's on.
+  - `streaming`: no effect on the NPU; in CPU-model mode it types as you speak.
+  - `vad.enabled`: without `voxtype setup vad` it's a loudness gate. It skips silence, not noise, and
+    `voxtype doctor` shows a misleading VAD error.
+- **One bad value can switch the guard off (Voxtype 1.3).** Voxtype reads each top-level table of its
+  config on its own, and a single value that doesn't fit its schema (also inside
+  `[output.notification]`) turns the whole `[output]` section back to its defaults, including the
+  guard, while `[whisper]` keeps sending to the NPU. `amd-npu doctor` and the card now say so in red
+  ("Guard not active"). Find the value with `voxtype config get output.pre_recording_command --json`
+  and `journalctl --user -u voxtype`.
 - **Plugging a mic in mid-dictation can leave that dictation silent.** Unplugging is fine: PipeWire
   moves the recording to the next mic and it carries on. But when a mic is plugged in (or a wireless
   headset's receiver goes back in), PipeWire makes it the default and moves the live recording onto

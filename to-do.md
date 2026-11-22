@@ -70,3 +70,31 @@
       `IpcHandler::updateRegistration` (from `onPostReload`, ipchandler.cpp:318). Seen 2026-10-03 when
       `omarchy plugin update` rewrote ~10 files in the plugin folder at once. Core dump symbolized
       with Arch's debuginfod; see CLAUDE.md.
+
+## Voxtype 1.3.0 round (2026-11-21)
+Follow-up tests:
+- [ ] Does the daemon apply a changed `max_duration_secs` without a restart? (The card follows it live.)
+- [ ] A non-English `language` clip: does FastFlowLM honour `language`?
+- [ ] Re-run the checks on Voxtype 1.3.1.
+- [ ] One Voxtype restart per command (`disable` and `enable` restart it twice).
+- [ ] Don't record our own endpoint as the "original" `[whisper]` (old installs hold `mode local` plus our endpoint).
+- [ ] Retake the README screenshots in Jade Horse (the waveform looks different now).
+- [ ] Card meeting UI (the state file stays idle; use `meeting_state`): only if a user asks.
+
+## Upstream (Voxtype), drafts for the owner to post
+- [ ] **Chip shows the wrong model.** In remote mode the overlay chip shows the local model key
+      ("whisper · base.en"); it should show `remote_model`.
+- [ ] **`config set` replaces a symlinked config** with a regular file (dotfile managers lose the link).
+- [ ] **`meeting start` downloads GTCRN (536 KB)** even with `echo_cancel = "disabled"`.
+- [ ] **Meeting chunk transcription blocks the daemon's main loop** (`meeting/mod.rs:1073`, synchronous):
+      push-to-talk starts seconds late and SIGTERM is ignored while finalizing.
+- [ ] **The OSD child (qs, audio bridge) outlives the daemon** when it's killed.
+- [ ] **`-c <missing file>` silently uses built-in defaults.** It should fail.
+- [ ] **Stale `meeting_state`** (`finalizing`) after a killed daemon.
+- [ ] **`voxtype doctor` shows a VAD ERROR** although the Energy fallback works (`backend = "energy"` silences it).
+- [ ] **`pre_recording_command` can't abort a recording.** `record cancel` from the hook stalls ~2 s
+      (the CLI waits for an acknowledgement from the daemon that is blocked on the hook), hooks have
+      no timeout, and the "hook failed" notice comes late and misworded.
+- [ ] **Per-table config salvage** (1.3.0): one bad value resets the whole table, and only a log line
+      says so. Ask for a visible notice, and for `config get` to log to stderr, not stdout.
+- [ ] **No pre-meeting hook**, so a guard like ours can't cover meetings.
