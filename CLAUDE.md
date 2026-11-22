@@ -426,17 +426,17 @@ because only NPU dictations are counted.
     there were none on our remote config. Accepting one switches engine and model in one write;
     untested whether that leaves remote mode alone, so run doctor after one.
 - **Voxtype 1.3.0 (checked 2026-11-21).** Findings from the validation round; the work, evidence and
-  reviews are in `~/Work/npu-lab/bench/voxtype13/`. All of it is handled in 0.15.0 unless noted.
+  reviews were kept outside this repo. All of it is handled in 0.15.0 unless noted.
   - **Engine bypass.** A top-level `engine` other than whisper makes Voxtype ignore `[whisper]`
     (also `VOXTYPE_ENGINE`, `transcribe --engine`, `record start --model <other engine's model>`;
     `secondary_model` only works with the built-in hotkey; profiles can't bypass). A missing,
-    unknown or unreadable engine means whisper. So two predicates (`bin/amd-npu:282-299`):
+    unknown or unreadable engine means whisper. So two predicates (`bin/amd-npu:294-316`):
     `voxtype_points_here` = `[whisper]` sends to our URL, `voxtype_on_npu` = that and engine whisper.
     The guard stays on `points_here` on purpose: with another engine a whisper `--model` override
     still sends to 52625, so a guard no-op would open a hole (rejected). Also rejected: forcing
     `[whisper] model = large-v3-turbo`, which breaks CPU-model mode (only base.en is local).
     `enable` switches the engine with a consent line and saves it to `original-engine.json`;
-    `disable` restores it only if the engine is still whisper (`voxtype_engine_restore`, :321).
+    `disable` restores it only if the engine is still whisper (`voxtype_engine_restore`, :341). It is restored only in the "endpoint is ours" branches of `voxtype_restore` (any loopback spelling of our port counts, `OUR_ENDPOINT_RE`); when the user re-pointed `[whisper]`, the saved engine is dropped with a note, like the rest of the group. `enable` prints its NPU claims late (`ok_later`/`flush_later`) so a dropped guard (`enable_stop_if_guard_dropped`) is never preceded by a green line.
     `voxtype_cfg` handles top-level keys with `VOX_SECTION=.` (insert before the first `[table]`; a
     key appended after a table lands inside it and Voxtype ignores it). `status --json` has `onNpu`
     and `engine`; the card uses `onNpu`, which also fixes it showing READY for any remote server.
@@ -447,13 +447,20 @@ because only NPU dictations are counted.
     effective-aware would make "Apply plugin update" loop) still says yes. `guard_effective` asks
     `RUST_LOG=off voxtype -q -c "$VOXTYPE_CONFIG" config get output.pre_recording_command`: 1.3 logs
     its WARN lines to **stdout**, so without both flags another dropped section breaks the match.
-    `null` = dropped (`guardIgnored`), failure or empty output = unknown (never red). There is no
+    `null` = dropped (`guardIgnored`), failure or empty output = unknown (never red). The answer is
+    cached in `$XDG_RUNTIME_DIR/amd-npu-guard-effective` as `<yes|no|unknown> <ident>` (`guard_effective_set`,
+    `bin/amd-npu:527`). `ident` is the stat identity (dev.ino.size.mtime_ns.ctime_ns) of the config's real
+    path and of the voxtype binary, taken by `vox_cache_load`'s Python run (`shutil.which`, no extra fork):
+    an `mtime -nt` test missed `cp -p` restores, package upgrades (mtime kept) and sandbox runs with a
+    temp config but the real runtime dir. No ident (cache not loaded, e.g. right after a `set`) means no
+    cache. A timeout (`timeout 3`) isn't remembered; an old Voxtype's failure is (`unknown`), so it isn't
+    exec'd every 5 s. There is no
     `config validate`. `config get` uses the same loader as the daemon. `voxtype config set` refuses
     bad values (rc 2) but replaces a symlinked config with a regular file, so we never shell out to
     it. Hand edits and upgrades are the risk.
   - **Guard speed.** `voxtype record cancel` blocks ~2 s: the CLI waits for the daemon to
     acknowledge, and the daemon is blocked awaiting our hook (`CANCEL_ACK_TIMEOUT` 2 s, hooks have no
-    timeout). `lib/dictation-guard.py:69-94` now starts the cancel without waiting and polls for
+    timeout). `lib/dictation-guard.py:70-97` now starts the cancel without waiting and polls for
     `$XDG_RUNTIME_DIR/voxtype/cancel` (10 ms steps, up to 1 s): the trigger file on disk is what makes
     the cancel win over a queued stop, so don't fire and forget. Idle ~50 ms instead of 2.08 s.
     `notify-send` has `timeout=2`. Voxtype's own "hook failed" notice is late and misworded.

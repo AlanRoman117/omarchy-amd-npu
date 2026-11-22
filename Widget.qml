@@ -193,7 +193,7 @@ Panel {
     var held = gb(info.npuMb) + " NPU + " + gb(info.rssMb)
     if (exclusive && llm) return "On: " + llm.name + " has the NPU alone (" + held + "); dictation on the CPU"
     if (llm) return "On: dictation + " + llm.name + " (" + held + ")"
-    if (!onNpu) return "On: Whisper (" + held + "); Voxtype uses its CPU model"
+    if (!onNpu) return "On: Whisper (" + held + "); " + dictationElsewhere()
     return "On: dictation (" + held + ")"
   }
 
@@ -310,10 +310,30 @@ Panel {
     return "Loads " + embedName + " (~0.6 GB) for apps that search by meaning."
   }
 
+  // Voxtype's engine names as the product spells them.
+  readonly property var engineNames: ({
+    parakeet: "Parakeet", moonshine: "Moonshine", sensevoice: "SenseVoice", paraformer: "Paraformer",
+    dolphin: "Dolphin", omnilingual: "Omnilingual", cohere: "Cohere", gguf: "GGUF", openvino: "OpenVINO", soniox: "Soniox"
+  })
+  // The engine when it is not Whisper (Voxtype ignores [whisper] then), else "".
+  function otherEngine() {
+    var eng = String(info.engine || "")
+    if (eng === "" || eng === "whisper") return ""
+    return engineNames[eng] || eng
+  }
+
+  // Where dictation goes when it is not the NPU, for the switch's subtitle.
+  function dictationElsewhere() {
+    var eng = otherEngine()
+    if (eng !== "") return "Voxtype uses its " + eng + " engine"
+    if (info.backend === "remote" && !backendNpu) return "Voxtype uses another server"
+    return "Voxtype uses its CPU model"
+  }
+
   function backendText() {
     if (info.backend === "-" || info.backend === undefined) return "not set up"
-    var eng = String(info.engine || "")
-    if (eng !== "" && eng !== "whisper") return eng.charAt(0).toUpperCase() + eng.slice(1)
+    var eng = otherEngine()
+    if (eng !== "") return eng
     if (backendNpu) return "NPU"
     if (info.backend === "remote") return "Other server"
     return "CPU model"
@@ -411,6 +431,7 @@ Panel {
     if (state === recState) return
     recState = state
     if (state === "recording" || state === "streaming") {
+      osdFrontendFile.reload()
       recStartMs = Date.now()
       micSilent = false
       peakArmTimer.restart()
@@ -637,7 +658,10 @@ Panel {
     onLoadFailed: root.parseVoxtypeConfig("")
   }
 
+  // The file may be created after the shell started (Voxtype writes it when it starts the overlay),
+  // so it is read again whenever a recording begins.
   FileView {
+    id: osdFrontendFile
     path: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/voxtype/osd_frontend"
     watchChanges: true
     printErrors: false

@@ -14,7 +14,8 @@ hook inline, with no timeout. The CLI waits up to 2 s for the daemon to acknowle
 the daemon can't acknowledge while it is blocked in this hook, so waiting on the CLI stalled every
 cancel by 2 s. Instead the CLI is started and not waited for. The cancel trigger file being on disk
 before the hook returns is what guarantees the cancel wins over a queued stop, so the hook polls for
-that file (up to 1 s) and returns. The CLI exits by itself after its own timeout.
+that file (up to 1 s) and returns. The CLI normally exits as soon as the daemon consumes the
+trigger; it only waits out its own timeout when the trigger never appears.
 """
 
 import os
@@ -66,7 +67,7 @@ def main():
     owner = port_owner()
     if owner == "own":
         return 0
-    cancel_file = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}",
+    cancel_file = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp",
                                "voxtype", "cancel")
     try:
         proc = subprocess.Popen(["voxtype", "record", "cancel"], stdin=subprocess.DEVNULL,

@@ -238,7 +238,7 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 | `amd-npu resume` | Brings Whisper back on the NPU and dictation with it |
 | `amd-npu hide-npu <command>` | Runs a program with the NPU hidden from it, e.g. a ROCm app (see below) |
 | `amd-npu f9 toggle` / `hold` | Tap F9 to start and tap again to stop, or back to holding it (Omarchy's default); the card's **F9** row does the same |
-| `amd-npu disable` | Puts Voxtype's `[whisper]` settings (and engine) back if they're still the ones `enable` set, removes the dictation guard and stops the server (frees the NPU and port 52625) |
+| `amd-npu disable` | Puts Voxtype's `[whisper]` settings (and engine) back as long as `[whisper]` still points at the NPU (changed keys are named), removes the dictation guard and stops the server (frees the NPU and port 52625) |
 | `amd-npu remove` | `disable` + delete the services; asks before deleting models, settings, old backups, packages and the memlock setting |
 
 ## What it changes on your system
@@ -266,8 +266,8 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
   latest copies of the file are kept in `~/.config/amd-npu/voxtype/`, and `disable`/`remove` put
   the originals back, as long as `[whisper]` still points at the NPU. If you've pointed Voxtype
   somewhere else since, `[whisper]` is left as you set it; if you changed some values after `enable`,
-  they go back to your earlier ones and the command names them (the previous file is kept as
-  `config.toml.latest`). Every other key is kept. Edits are atomic and follow a symlinked config (dotfile managers keep working).
+  they go back to your earlier ones and the command names them (a copy of the file from just
+  before is in `config.toml.latest` until amd-npu next edits the config). Every other key is kept. Edits are atomic and follow a symlinked config (dotfile managers keep working).
   `[output]` gets `pre_recording_command = "python3 ~/.local/share/amd-npu/dictation-guard.py"` (the
   dictation guard, see [Good to know](#good-to-know)); if you already had a command there, it's kept and
   runs after the guard, and `disable`/`remove` take only the guard out.
@@ -309,8 +309,8 @@ Recording and transcribing states are also shown by Omarchy's built-in dictation
 - **Some Voxtype settings bypass the NPU.** `enable` makes Whisper the engine, but these still run
   somewhere else: `voxtype record start --model <another engine's model>`, `whisper.secondary_model`
   with Voxtype's own hotkey, `voxtype meeting start --engine/--model`, and the `VOXTYPE_ENGINE`
-  environment variable. `amd-npu doctor` and the card say "dictation doesn't use the NPU" when the
-  engine isn't Whisper.
+  environment variable. `amd-npu doctor` says "dictation doesn't use the NPU" when the engine
+  isn't Whisper, and the card shows the engine name (for example "Parakeet").
 - **Voxtype's meeting mode uses the NPU too** (`[meeting] enabled`, `voxtype meeting start`).
   - Each 30 seconds of a meeting is two requests (microphone and the other side), about 7 seconds of
     NPU time.
