@@ -9,10 +9,16 @@ import qs.Ui
 // above Voxtype's waveform (or below it when there's no room above) so the two
 // never overlap and nobody has to move either one.
 //
-// Voxtype puts its waveform at y = clamp(H * top_margin, margin, H - height -
-// margin), centred, for bottom-center and top-center (measured with
-// `hyprctl layers -j`: 0.78 on a 1000 px high screen gives y 780). In a corner,
-// or when its overlay is off, the card takes Omarchy's usual OSD spot.
+// Voxtype puts its waveform at y = clamp(want, margin, H - height - margin),
+// centred, where want is H * top_margin for bottom-center. For top-center with
+// top_margin > 0.5 Voxtype mirrors it: want = H * (1 - top_margin) - height
+// (measured with `hyprctl layers -j`: 0.78 on a 1000 px high screen gives y
+// 780 for bottom-center). `height` is 72 for Voxtype's Quickshell overlay (its
+// compact card, whatever osd.height_px says) and osd.height_px for GTK4; the
+// widget passes the right one in voxHeight. In a corner, or when its overlay
+// is off, the card takes Omarchy's usual OSD spot. No clearance is kept for
+// Voxtype's model chip, which draws over our card's bottom padding for ~1.8 s
+// at the start of a recording.
 Item {
   id: root
 
@@ -29,7 +35,7 @@ Item {
   property bool micAlert: false
   readonly property bool showMic: mic !== "" && !transcribing
 
-  // Voxtype's [osd] settings (defaults as in voxtype 1.1).
+  // Voxtype's [osd] settings (defaults as in voxtype 1.1); voxHeight is the real card height.
   property bool voxEnabled: true
   property string voxPosition: "bottom-center"
   property real voxTopMargin: 0.85
@@ -44,7 +50,9 @@ Item {
 
   function cardY(screenHeight, cardHeight) {
     if (!voxCentred) return screenHeight - Style.space(67) - cardHeight
-    var waveTop = Math.max(voxMargin, Math.min(screenHeight - voxHeight - voxMargin, screenHeight * voxTopMargin))
+    var f = Math.max(0, Math.min(1, voxTopMargin))
+    var want = (voxPosition === "top-center" && f > 0.5) ? screenHeight * (1 - f) - voxHeight : screenHeight * f
+    var waveTop = Math.max(voxMargin, Math.min(screenHeight - voxHeight - voxMargin, want))
     var above = waveTop - clearance - cardHeight
     return above >= Style.space(40) ? above : waveTop + voxHeight + clearance
   }

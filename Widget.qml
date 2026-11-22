@@ -55,6 +55,9 @@ Panel {
   property real voxOsdTopMargin: 0.85
   property int voxOsdHeight: 48
   property int voxOsdMargin: 24
+  // Which overlay Voxtype 1.3 draws its waveform with ("quickshell" or "gtk4"), from
+  // $XDG_RUNTIME_DIR/voxtype/osd_frontend; empty when the file isn't there.
+  property string voxOsdFrontend: ""
   // Voxtype's [audio] device. "default" (and the pipewire/pulse ALSA plugins)
   // follow the system default input at record time; anything else locks
   // dictation to that ALSA device.
@@ -91,7 +94,8 @@ Panel {
   // Input list for the picker: a snapshot taken while the card is open, never
   // bound to the live node list (rebuilding from it has crashed Quickshell).
   property var micInputs: []
-  readonly property bool recording: recState === "recording"
+  // "streaming" is the CPU-model mode with whisper.streaming = true; it records like "recording".
+  readonly property bool recording: recState === "recording" || recState === "streaming"
   readonly property bool recWarn: recording && recRemaining <= 15
   // The NPU driver is stuck (a thread asleep in it, or a driver crash in this boot's kernel log):
   // nothing may start or stop on the NPU until a reboot.
@@ -102,10 +106,13 @@ Panel {
   // (where Voxtype draws its waveform) shows the countdown.
   readonly property var barScreen: button.QsWindow.window ? button.QsWindow.window.screen : null
 
-  // Voxtype's waveform overlay works out its position once, from the screen it started on, so after
-  // a monitor is plugged in or unplugged it can end up off-screen. When the screens change, its
-  // overlay process is restarted (the Voxtype daemon starts a new one within about a second), only
-  // while Voxtype is idle, and by one widget instance only.
+  // GTK4 waveform overlay only: it works out its position once, from the screen it started on, so
+  // after a monitor is plugged in or unplugged it can end up off-screen. When the screens change,
+  // its process is restarted (the Voxtype daemon starts a new one within about a second), only
+  // while Voxtype is idle, and by one widget instance only. This is a safety net: Voxtype 1.2.2+
+  // defaults to the Quickshell overlay, which makes one surface per output and re-places itself
+  // live, so the restart matches nothing there. Never match voxtype-osd-qui (the theme follower,
+  // which nothing respawns); the supervised child is qs.
   readonly property string screensSig: Quickshell.screens.map(function(s) { return s.name + ":" + s.width + "x" + s.height }).join(",")
   property string screensBaseline: ""
   property bool osdRestartPending: false
@@ -122,7 +129,10 @@ Panel {
   readonly property var llm: info.llm || null
   readonly property var downloaded: info.downloaded || []
   readonly property bool exclusive: info.mode === "exclusive"
-  readonly property bool onNpu: info.backend === "remote" && info.service === "active" && !exclusive
+  // Voxtype sends its audio to our NPU server. A stale CLI doesn't send info.onNpu; it only says
+  // "remote", which then stands in for it.
+  readonly property bool backendNpu: info.onNpu === undefined ? info.backend === "remote" : !!info.onNpu
+  readonly property bool onNpu: backendNpu && info.service === "active" && !exclusive
   // "foreign": another account listens where 127.0.0.1:52625 traffic would go (loopback, 0.0.0.0,
   // ::, ::1 or ::ffff:127.0.0.1; port hex CD91). It would receive the audio and choose the text
   // Voxtype types, so this is checked before anything talks to it.
@@ -254,8 +264,8 @@ Panel {
     if (released) return "RELEASED"
     if (status !== "ready") return "STOPPED"
     if (exclusive) return "LLM ONLY"
-    if (llm && info.backend === "remote") return "READY + LLM"
-    if (info.backend === "remote") return "READY"
+    if (llm && backendNpu) return "READY + LLM"
+    if (backendNpu) return "READY"
     return "LOCAL MODEL"
   }
 
@@ -301,8 +311,11 @@ Panel {
   }
 
   function backendText() {
-    if (info.backend === "remote") return "NPU"
     if (info.backend === "-" || info.backend === undefined) return "not set up"
+    var eng = String(info.engine || "")
+    if (eng !== "" && eng !== "whisper") return eng.charAt(0).toUpperCase() + eng.slice(1)
+    if (backendNpu) return "NPU"
+    if (info.backend === "remote") return "Other server"
     return "CPU model"
   }
 
@@ -397,7 +410,7 @@ Panel {
     var state = String(data.alt || data["class"] || "idle")
     if (state === recState) return
     recState = state
-    if (state === "recording") {
+    if (state === "recording" || state === "streaming") {
       recStartMs = Date.now()
       micSilent = false
       peakArmTimer.restart()
@@ -624,6 +637,15 @@ Panel {
     onLoadFailed: root.parseVoxtypeConfig("")
   }
 
+  FileView {
+    path: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/voxtype/osd_frontend"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.voxOsdFrontend = String(text()).trim()
+    onLoadFailed: root.voxOsdFrontend = ""
+  }
+
   Timer {
     id: osdDebounce
     interval: 3000
@@ -653,7 +675,8 @@ Panel {
     id: screensSaveProc
   }
 
-  // The overlay's process name is truncated to 15 characters by the kernel ("voxtype-osd-gtk4").
+  // The GTK4 overlay's process name is truncated to 15 characters by the kernel ("voxtype-osd-gtk4").
+  // Matches nothing under the Quickshell overlay, which is fine.
   Process {
     id: osdRestartProc
     command: ["sh", "-c", "pkill -TERM -u \"$(id -u)\" -x voxtype-osd-gtk"]
@@ -717,7 +740,8 @@ Panel {
     voxEnabled: root.voxOsdEnabled
     voxPosition: root.voxOsdPosition
     voxTopMargin: root.voxOsdTopMargin
-    voxHeight: root.voxOsdHeight
+    // The Quickshell compact card is 72 px whatever height_px says; GTK4 uses height_px.
+    voxHeight: root.voxOsdFrontend === "quickshell" ? 72 : root.voxOsdHeight
     voxMargin: root.voxOsdMargin
   }
 
@@ -972,6 +996,19 @@ Panel {
             visible: !root.setupMode && root.info.npuHealth === "shared"
             textFormat: Text.PlainText
             text: "Also using the NPU: " + root.holdersText() + ". Two programs on the NPU can crash its driver; close it, or start it with amd-npu hide-npu."
+            color: Commons.Color.urgent
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+            width: parent.width
+          }
+
+          // Voxtype ignores its [output] section, so the dictation guard never runs. enable can't
+          // fix that, so it is a warning here and not a setup state.
+          Text {
+            visible: !root.setupMode && root.info.guardIgnored === true
+            textFormat: Text.PlainText
+            text: "Guard not active: Voxtype ignores its [output] section (run amd-npu doctor)"
             color: Commons.Color.urgent
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
