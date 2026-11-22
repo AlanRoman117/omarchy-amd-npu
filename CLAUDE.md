@@ -122,6 +122,8 @@ clone once installed with `omarchy plugin add`). Edits here don't reach it until
 
 ## README screenshots (`docs/screenshots/`)
 
+**Theme for new shots: Jade Horse** (it replaced Osaka Jade in Omarchy, 2026-11-21), for the card and for Voxtype's waveform, which follows the theme. The shots below are still Osaka Jade until they're retaken.
+
 `preview.png` at the repo root (README top and the marketplace's card image) is a real shot in Osaka Jade (1920x1080 from the external monitor for 0.12.0, 2560x1600 from the laptop for 0.11.4; either works, the marketplace resizes it): card open, countdown with live waveform, bar chip timer. Retake it on an empty workspace (`hyprctl dispatch 'hl.dsp.focus({ workspace = "9" })'`), open the card, `voxtype record start`, someone talking, capture within ~3 s (before the silence warning), `record cancel`, switch back. If you prompt the talker with a notification, dismiss it before capturing (`omarchy notification dismiss "<summary>"`) or it covers the card's header; strip metadata with `magick -strip -define png:exclude-chunks=date,time`.
 
 Card states: `card-whisper.png`, `card-share.png`, `card-exclusive.png`, `card-released.png` (qwen3.5:0.8b)
