@@ -133,11 +133,13 @@ wait_for_server() {
 #   voxtype_cfg get <key>             the value as text (empty if unset)
 #   voxtype_cfg dump                  the keys amd-npu manages, as typed JSON
 #   voxtype_cfg set k=str k:=json -k  set a string, set a typed JSON value, remove a key
+# VOX_SECTION=. means the top level of the file (keys before the first [table], like Voxtype's `engine`).
 voxtype_cfg() {
   # Reads come from the snapshot vox_cache_load took (one Python start instead of one per value);
   # any write drops it.
   if [[ ${1:-} == get && $VOX_CACHE_LOADED == 1 ]]; then
-    printf '%s\n' "${VOX_CACHE[${VOX_SECTION:-whisper}.$2]-}"
+    if [[ ${VOX_SECTION:-} == . ]]; then printf '%s\n' "${VOX_CACHE[.$2]-}"  # top level: key ".engine"
+    else printf '%s\n' "${VOX_CACHE[${VOX_SECTION:-whisper}.$2]-}"; fi
     return 0
   fi
   [[ ${1:-} == set ]] && VOX_CACHE_LOADED=0
@@ -145,12 +147,18 @@ voxtype_cfg() {
 import json, os, re, sys, tempfile, tomllib
 path, op, args = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3:]
 SECTION = os.environ.get("VOX_SECTION") or "whisper"
+ROOT = SECTION == "."  # top level of the file, before the first [table]
+if ROOT:
+    SECTION = ""
 MANAGED = ("mode", "backend", "remote_endpoint", "remote_model", "remote_timeout_secs")
 text = open(path).read()
 if op in ("get", "dump"):
     try:
-        table = tomllib.loads(text).get(SECTION, {})
+        config = tomllib.loads(text)
+        table = config if ROOT else config.get(SECTION, {})
     except tomllib.TOMLDecodeError:
+        table = {}
+    if not isinstance(table, dict):
         table = {}
     if op == "dump":
         print(json.dumps({k: table[k] for k in MANAGED if k in table}))
@@ -176,7 +184,7 @@ def fmt(k, v):
     if isinstance(v, (int, float)):
         return f"{k} = {v}"
     return f"{k} = {json.dumps(str(v))}"  # a JSON string is a valid TOML basic string
-out, section, seen, found = [], "", set(), False
+out, section, seen, found = [], "", set(), ROOT
 def flush():
     for k, v in want.items():
         if k not in seen:
@@ -186,7 +194,16 @@ for line in text.splitlines():
     h = HEADER.match(line)
     if h:
         if section == SECTION:
-            flush()
+            if ROOT:
+                # New top-level keys go above the comments and blank lines that lead into the
+                # first table, never after the header (they would land inside that table).
+                tail = []
+                while out and (not out[-1].strip() or out[-1].lstrip().startswith("#")):
+                    tail.append(out.pop())
+                flush()
+                out.extend(reversed(tail))
+            else:
+                flush()
         section = h.group(1)
         found = found or section == SECTION
     elif section == SECTION:
@@ -199,7 +216,7 @@ for line in text.splitlines():
     out.append(line)
 if section == SECTION:
     flush()
-if not found and want:
+if not found and want and not ROOT:  # top level never falls back to appending a [table]
     out += ["", f"[{SECTION}]"]
     flush()
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.toml.")
@@ -230,6 +247,9 @@ try:
         config = tomllib.load(f)
 except (OSError, ValueError):  # TOMLDecodeError and UnicodeDecodeError are both ValueErrors
     config = {}
+engine = config.get("engine")  # top level; cache key ".engine"
+if isinstance(engine, str):
+    sys.stdout.write(f".engine\0{engine.replace(chr(0), '')}\0")
 for section, keys in KEYS.items():
     table = config.get(section, {})
     if not isinstance(table, dict):
@@ -256,9 +276,64 @@ voxtype_backend() {
   echo "${b:-local}"
 }
 
-# Voxtype sends audio to this server (not just to some remote server).
-voxtype_on_npu() {
+# Voxtype's [whisper] section sends audio to this server (not just to some remote server). Blind to
+# the engine on purpose: with another engine, a whisper --model override still sends here, so the
+# dictation guard and the restore logic ask this one.
+voxtype_points_here() {
   [[ $(voxtype_backend) == remote && $(voxtype_cfg get remote_endpoint) == "$URL" ]]
+}
+
+# The engine Voxtype will run, normalized like Voxtype does: a known engine name passes through,
+# anything else (missing, unknown, wrong case, unreadable file) is whisper.
+voxtype_engine() {
+  local e=whisper
+  [[ -f $VOXTYPE_CONFIG ]] && e=$(VOX_SECTION=. voxtype_cfg get engine)
+  case $e in
+    parakeet|moonshine|sensevoice|paraformer|dolphin|omnilingual|cohere|gguf|openvino|soniox) echo "$e" ;;
+    *) echo whisper ;;
+  esac
+}
+
+# Dictation really goes to the NPU: [whisper] sends here and the engine is whisper (Voxtype ignores
+# [whisper] while another engine is selected). Use for user-facing "on the NPU" texts.
+voxtype_on_npu() {
+  voxtype_points_here && [[ $(voxtype_engine) == whisper ]]
+}
+
+# Voxtype's engine before enable switched it to whisper (restored by disable/remove if still ours).
+VOX_ORIGINAL_ENGINE="$VOX_STATE/original-engine.json"
+
+# Switches Voxtype's top-level engine to whisper, saving the old one the first time. Callers ask
+# for consent first and restart Voxtype themselves. No-op when the engine already is whisper.
+voxtype_engine_use_whisper() {
+  local cur; cur=$(voxtype_engine)
+  [[ $cur == whisper ]] && return 0
+  mkdir -p "$VOX_STATE"
+  [[ -f $VOX_ORIGINAL_ENGINE ]] || jq -nc --arg e "$cur" '{engine: $e}' >"$VOX_ORIGINAL_ENGINE"
+  voxtype_backup
+  VOX_SECTION=. voxtype_cfg set engine=whisper
+}
+
+# disable/remove: puts the saved engine back, but only if the file still says engine = "whisper"
+# (what enable wrote). If the user changed it since, it's left alone. Sets VOX_ENGINE_RESTORED=1 when
+# it edited the file (the caller restarts Voxtype).
+VOX_ENGINE_RESTORED=0
+voxtype_engine_restore() {
+  [[ -f $VOX_ORIGINAL_ENGINE ]] || return 0
+  local saved raw
+  saved=$(jq -r '.engine // empty' "$VOX_ORIGINAL_ENGINE" 2>/dev/null || true)
+  raw=$(VOX_SECTION=. voxtype_cfg get engine)
+  if [[ -z $saved ]]; then
+    :
+  elif [[ $raw == whisper ]]; then
+    voxtype_backup
+    VOX_SECTION=. voxtype_cfg set engine="$saved"
+    VOX_ENGINE_RESTORED=1
+    ok "Voxtype's engine put back to \"$saved\""
+  else
+    note "Voxtype's engine is now \"${raw:-unset}\"; left as you set it (it was \"$saved\" before amd-npu)"
+  fi
+  rm -f "$VOX_ORIGINAL_ENGINE"
 }
 
 # Keeps the first and the latest copy of Voxtype's config, dereferenced, in amd-npu's own folder.
@@ -273,7 +348,7 @@ voxtype_save_original() {
   [[ -f $VOX_ORIGINAL ]] && return 0
   # Already on the NPU with nothing recorded: set up by a version before 0.8, so the user's own
   # values are unknown. Recording these would make disable "restore" the NPU settings.
-  voxtype_on_npu && return 0
+  voxtype_points_here && return 0
   # Mid NPU-only round trip: the current values are amd-npu's own, not the user's.
   [[ -f $VOX_EXCLUSIVE ]] && return 0
   mkdir -p "$VOX_STATE"
@@ -283,11 +358,18 @@ voxtype_save_original() {
 # A Voxtype remote timeout already at 180 s or more (integer or decimal) is left alone.
 timeout_ok() { [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v t="$1" 'BEGIN { exit !(t >= 180) }'; }
 
+# The consent line for the engine switch (nothing when the engine already is whisper).
+voxtype_engine_changes_text() {
+  local e; e=$(voxtype_engine)
+  [[ $e == whisper ]] || echo "  Top of the file: engine = \"whisper\" (now \"$e\"; Voxtype ignores [whisper] while another engine is selected)"
+}
+
 voxtype_changes_text() {
   echo "  Voxtype's config ($VOXTYPE_CONFIG), [whisper] section:"
   echo "    mode = \"remote\", remote_endpoint = \"$URL\", remote_model = \"$WHISPER\""
   [[ -n $(voxtype_cfg get backend) ]] && echo "    the old 'backend' line is removed (Voxtype 1.1 renamed it to 'mode')"
   timeout_ok "$(voxtype_cfg get remote_timeout_secs)" || echo "    remote_timeout_secs = 180 (long dictations take up to ~1 min to transcribe)"
+  voxtype_engine_changes_text
   echo "  [output] section: pre_recording_command runs amd-npu's dictation guard as each recording"
   echo "    starts. It cancels the recording if another account holds port $PORT (any command you"
   echo "    already have there runs after it)."
@@ -299,7 +381,7 @@ voxtype_changes_text() {
 voxtype_use() {
   [[ -f $VOXTYPE_CONFIG ]] || return 0
   if [[ $1 == remote ]]; then
-    voxtype_on_npu && return 0
+    voxtype_points_here && return 0
     voxtype_save_original
     voxtype_backup
     local args=(mode=remote -backend remote_endpoint="$URL" remote_model="$WHISPER")
@@ -318,17 +400,46 @@ voxtype_use() {
 # then Voxtype goes back to its CPU model, as before.
 voxtype_restore() {
   [[ -f $VOXTYPE_CONFIG ]] || return 0
+  VOX_ENGINE_RESTORED=0
+  voxtype_engine_restore
   if [[ ! -f $VOX_ORIGINAL ]]; then
+    # voxtype_use skips its restart when Voxtype is already local; an engine change still needs one.
+    local was_local=0
+    [[ $(voxtype_backend) == local ]] && was_local=1
     voxtype_use local
+    (( VOX_ENGINE_RESTORED && was_local )) && { systemctl --user restart voxtype.service 2>/dev/null || true; }
     return 0
   fi
   voxtype_backup
-  local k v args=()
+  # [whisper] mode, backend, remote_endpoint, remote_model and remote_timeout_secs are one group:
+  # they're put back only while the file still points at the NPU (the user hasn't re-pointed it).
+  vox_cache_load
+  local ep; ep=$(voxtype_cfg get remote_endpoint)
+  if [[ $ep != "$URL" ]]; then
+    note "Voxtype's [whisper] now uses ${ep:-no remote endpoint}; left as you set it"
+    rm -f "$VOX_ORIGINAL" "$VOX_EXCLUSIVE"
+    systemctl --user restart voxtype.service 2>/dev/null || true
+    return 0
+  fi
+  # A value counts as changed after enable when it is neither what amd-npu wrote nor what was there
+  # before (remote_timeout_secs is only ever raised, so it isn't checked).
+  local k v cur ours changed=() args=()
   for k in mode backend remote_endpoint remote_model remote_timeout_secs; do
     v=$(jq -c --arg k "$k" 'if has($k) then .[$k] else empty end' "$VOX_ORIGINAL")
     if [[ -n $v ]]; then args+=("$k:=$v"); else args+=("-$k"); fi
+    [[ $k == remote_timeout_secs ]] && continue
+    case $k in
+      mode) ours=remote; [[ -f $VOX_EXCLUSIVE ]] && ours=local ;;
+      backend) ours="" ;;
+      remote_endpoint) ours=$URL ;;
+      remote_model) ours=$WHISPER ;;
+    esac
+    cur=$(voxtype_cfg get "$k")
+    v=$(jq -r --arg k "$k" 'if has($k) then (.[$k] | tostring) else "" end' "$VOX_ORIGINAL")
+    [[ $cur != "$ours" && $cur != "$v" ]] && changed+=("$k=${cur:-unset}")
   done
   voxtype_cfg set "${args[@]}"
+  (( ${#changed[@]} )) && note "Changed after enable, reset to your earlier values: ${changed[*]} (previous file: $VOX_STATE/config.toml.latest)"
   # Cleared, so a later enable records whatever the user has set by then.
   rm -f "$VOX_ORIGINAL" "$VOX_EXCLUSIVE"
   systemctl --user restart voxtype.service 2>/dev/null || true
@@ -336,7 +447,7 @@ voxtype_restore() {
 
 # NPU-only LLM: Voxtype moves to its CPU model only if it was on the NPU, and only then comes back.
 voxtype_exclusive_on() {
-  voxtype_on_npu || { note "Voxtype isn't using the NPU, so it's left as it is"; return 1; }
+  voxtype_points_here || { note "Voxtype isn't using the NPU, so it's left as it is"; return 1; }
   voxtype_use local
   mkdir -p "$VOX_STATE" && touch "$VOX_EXCLUSIVE"
 }
@@ -462,7 +573,7 @@ install_stale() {
     ! cmp -s "$ROOT/systemd/$UNIT" "$UNIT_FILE" ||
     ! cmp -s "$ROOT/systemd/$PROXY_UNIT" "$PROXY_UNIT_FILE" ||
     ! cmp -s "$ROOT/systemd/$PROXY_SOCKET" "$PROXY_SOCKET_FILE" ||
-    { voxtype_on_npu && ! guard_installed; }
+    { voxtype_points_here && ! guard_installed; }
 }
 
 # The session's memlock ceiling is unlimited (the user service manager's hard limit).
@@ -783,27 +894,43 @@ cmd_enable() {
 
   step "Voxtype"
   if [[ -f $VOXTYPE_CONFIG ]]; then
-    if voxtype_on_npu && [[ -z $(voxtype_cfg get mode) && -n $(voxtype_cfg get backend) ]]; then
+    if voxtype_points_here && [[ -z $(voxtype_cfg get mode) && -n $(voxtype_cfg get backend) ]]; then
       # Same setting under Voxtype 1.1's new name; drops the deprecation warning on every dictation.
       voxtype_backup
       voxtype_cfg set mode=remote -backend
       systemctl --user restart voxtype.service 2>/dev/null || true
-      ok "Already pointed at the NPU; renamed Voxtype's deprecated 'backend' setting to 'mode'"
-    elif voxtype_on_npu; then
-      ok "Already pointed at the NPU"
+      ok "Renamed Voxtype's deprecated 'backend' setting to 'mode'"
+    fi
+    if voxtype_points_here; then
+      if [[ $(voxtype_engine) == whisper ]]; then
+        ok "Already pointed at the NPU"
+      else
+        voxtype_engine_changes_text
+        if confirm "Switch Voxtype's engine to Whisper so dictation uses the NPU?"; then
+          voxtype_engine_use_whisper
+          systemctl --user restart voxtype.service 2>/dev/null || true
+          ok "Voxtype's engine switched to Whisper; dictation transcribes on the NPU (previous engine saved)"
+        else
+          note "Voxtype's engine is $(voxtype_engine): dictation doesn't use the NPU. Run 'amd-npu enable' again to switch it."
+        fi
+      fi
     elif voxtype_exclusive_off; then
-      ok "Dictation back on the NPU"
+      if voxtype_on_npu; then ok "Dictation back on the NPU"
+      else note "Voxtype's engine is $(voxtype_engine): dictation doesn't use the NPU (run 'amd-npu enable' to switch it back to Whisper)"; fi
     else
       voxtype_changes_text
       if confirm "Point Voxtype at the NPU?"; then
+        # The engine goes first so voxtype_use's restart covers both edits.
+        voxtype_engine_use_whisper
         voxtype_use remote
         voxtype_guard_on
-        ok "Dictation now transcribes on the NPU, with the dictation guard (previous values saved)"
+        if voxtype_on_npu; then ok "Dictation now transcribes on the NPU, with the dictation guard (previous values saved)"
+        else note "Voxtype's engine is $(voxtype_engine): dictation doesn't use the NPU"; fi
       else
         note "Voxtype left as it was. Run 'amd-npu enable' again to switch it."
       fi
     fi
-    if { voxtype_on_npu || [[ -f $VOX_EXCLUSIVE ]]; } && ! guard_installed; then
+    if { voxtype_points_here || [[ -f $VOX_EXCLUSIVE ]]; } && ! guard_installed; then
       echo "  Voxtype's config ($VOXTYPE_CONFIG), [output] section: pre_recording_command runs"
       echo "    amd-npu's dictation guard as each recording starts, cancelling it if another account"
       echo "    holds port $PORT. Any command you already have there runs after it; 'amd-npu disable'"
@@ -835,6 +962,7 @@ cmd_status_json() {
   systemctl --user is-active --quiet "$PROXY_UNIT" && proxy=active
   systemctl --user is-active --quiet "$PROXY_SOCKET" && held=true
   guard_installed && guard=true
+  local on_npu=false; voxtype_on_npu && on_npu=true
   [[ $(port_owner "$PORT") == other ]] && port_ok=false
   install_stale && stale=true
   systemctl --user is-active --quiet "$UNIT" && service=active
@@ -846,7 +974,7 @@ cmd_status_json() {
   [[ -z $llm_info ]] && llm_info="null"
   jq -nc \
     --arg service "$service" --arg proxy "$proxy" --argjson server "$server" --argjson model "$whisper_dl" \
-    --arg firmware "$(npu_firmware)" --arg backend "$(voxtype_backend)" \
+    --arg firmware "$(npu_firmware)" --arg backend "$(voxtype_backend)" --argjson onNpu "$on_npu" --arg engine "$(voxtype_engine)" \
     --arg last "$(last_latency)" --arg modelName "$WHISPER" --arg url "$URL" \
     --arg mode "$(mode)" --arg llm "$llm" --argjson llmInfo "$llm_info" \
     --argjson rss "$(server_rss_mb)" --argjson npuMb "$(server_npu_mb)" --argjson ctx "$(env_get FLM_CTX -1)" \
@@ -856,7 +984,7 @@ cmd_status_json() {
     '{service: $service, proxy: $proxy, server: $server, model: $model, modelName: $modelName, url: $url,
       portOk: $portOk, portHeld: $portHeld, guard: $guard, stale: $stale, released: $released, f9: $f9, npuHealth: ($health | split(" ")[0]),
       npuDetail: ($health | sub("^[a-z]+ ?"; "")),
-      firmware: $firmware, backend: $backend, last: $last, mode: $mode, rssMb: $rss, npuMb: $npuMb,
+      firmware: $firmware, backend: $backend, onNpu: $onNpu, engine: $engine, last: $last, mode: $mode, rssMb: $rss, npuMb: $npuMb,
       llm: (if $llm == "" then null else ($llmInfo + {name: $llm, ctxSetting: $ctx}) end),
       embed: $embed, downloaded: $models}'
 }
@@ -915,13 +1043,16 @@ cmd_status() {
   if systemctl --user is-active --quiet "$PROXY_SOCKET"; then ok "Port $PORT held for this account ($PROXY_SOCKET)"
   else bad "$PROXY_SOCKET isn't holding port $PORT: run 'amd-npu enable'"; ready=1; fi
   if guard_installed; then ok "Dictation guard in Voxtype's pre_recording_command"
-  elif voxtype_on_npu; then bad "No dictation guard in Voxtype: run 'amd-npu enable'"; ready=1; fi
+  elif voxtype_points_here; then bad "No dictation guard in Voxtype: run 'amd-npu enable'"; ready=1; fi
   if server_up; then ok "Server answering on $URL"; else bad "Server not answering on $URL"; ready=1; fi
   if [[ -d $WHISPER_DIR ]]; then ok "Whisper model $WHISPER present"; else bad "Whisper model $WHISPER not downloaded"; ready=1; fi
   local fw; fw=$(npu_firmware)
   [[ -n $fw ]] && ok "NPU firmware $fw"
   case $(voxtype_backend) in
-    remote) if voxtype_on_npu; then ok "Voxtype dictates on the NPU"; else note "Voxtype uses another remote server ($(voxtype_cfg get remote_endpoint))"; ready=1; fi ;;
+    remote) if voxtype_points_here; then
+        if [[ $(voxtype_engine) == whisper ]]; then ok "Voxtype dictates on the NPU"
+        else note "Voxtype's engine is $(voxtype_engine): dictation doesn't use the NPU (run 'amd-npu enable' to switch it back to Whisper)"; ready=1; fi
+      else note "Voxtype uses another remote server ($(voxtype_cfg get remote_endpoint))"; ready=1; fi ;;
     -) note "Voxtype not set up" ;;
     *) note "Voxtype dictates on its CPU model"; [[ $(mode) == exclusive ]] || ready=1 ;;
   esac
