@@ -366,6 +366,9 @@ voxtype_backup() {
 # Records Voxtype's own [whisper] values the first time amd-npu changes them.
 voxtype_save_original() {
   [[ -f $VOX_ORIGINAL ]] && return 0
+  # a hand-edited spelling of our own port isn't the user's original; disable then falls back to the CPU model
+  local ep; ep=$(voxtype_cfg get remote_endpoint)
+  [[ ${ep%/} =~ $OUR_ENDPOINT_RE && $ep != "$URL" ]] && return 0
   # Already on the NPU with nothing recorded: set up by a version before 0.8, so the user's own
   # values are unknown. Recording these would make disable "restore" the NPU settings.
   voxtype_points_here && return 0
@@ -464,11 +467,12 @@ voxtype_restore() {
     v=$(jq -r --arg k "$k" 'if has($k) then (.[$k] | tostring) else "" end' "$VOX_ORIGINAL")
     [[ $cur != "$ours" && $cur != "$v" ]] && changed+=("$k=${cur:-unset}")
   done
+  # before the [whisper] write, so config.toml.latest keeps the changed values
+  voxtype_engine_restore  # only here and in the no-original branch: the endpoint is ours
   voxtype_cfg set "${args[@]}"
   (( ${#changed[@]} )) && note "Changed after enable, reset to your earlier values: ${changed[*]} (previous file: $VOX_STATE/config.toml.latest)"
   # Cleared, so a later enable records whatever the user has set by then.
   rm -f "$VOX_ORIGINAL" "$VOX_EXCLUSIVE"
-  voxtype_engine_restore  # only here and in the no-original branch: the endpoint is ours
   systemctl --user restart voxtype.service 2>/dev/null || true
 }
 
@@ -1463,7 +1467,7 @@ cmd_disable() {
   step "Disable the NPU server"
   voxtype_guard_off
   voxtype_restore
-  if (( VOX_WHISPER_LEFT )); then ok "Voxtype's [whisper] left as you set it; other settings unchanged"
+  if (( VOX_WHISPER_LEFT )); then ok "Voxtype's [whisper] left as you set it; the dictation guard removed"
   else ok "Voxtype's own settings restored"; fi
   systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
   # Voxtype no longer sends audio to the port, so it can be let go.

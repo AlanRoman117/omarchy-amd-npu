@@ -281,7 +281,7 @@ because only NPU dictations are counted.
   OSD spot (`Style.space(67)` from the bottom). Only the bar instance on `Hyprland.focusedMonitor`
   shows it. 0.15.0: `height_px` is only the GTK4 overlay's; with Voxtype's Quickshell overlay (default
   since 1.2.2) the card is 72 px, picked by reading `$XDG_RUNTIME_DIR/voxtype/osd_frontend`
-  (`Widget.qml:641`, `voxHeight` at :744). `top-center` with `top_margin` > 0.5 is mirrored like
+  (`Widget.qml:663`, `voxHeight` at :768). `top-center` with `top_margin` > 0.5 is mirrored like
   Voxtype does: `y = H * (1 - f) - height`.
 - **Microphone (`Widget.qml`, 0.7.0):** Voxtype's `[audio] device = "default"` (also `pipewire`,
   `pulse`) follows the system default input at record time, so the card shows
@@ -491,8 +491,8 @@ because only NPU dictations are counted.
     computed. The chip ("whisper · base.en", the local model key, not the NPU model) draws inside the
     countdown card's bottom padding for ~1.8 s at each start. Cosmetic; no clearance added. The OSD
     child can outlive the daemon.
-  - **Restore group rule** (`voxtype_restore`, :401). `[whisper]` mode, backend, endpoint, model and
-    timeout restore as one group, and only if the file's `remote_endpoint` is still `$URL`;
+  - **Restore group rule** (`voxtype_restore`, :425). `[whisper]` mode, backend, endpoint, model and
+    timeout restore as one group, and only if the file's `remote_endpoint` is still on our port (any loopback spelling: `OUR_ENDPOINT_RE`, 127.0.0.1, localhost or [::1] on port 52625, trailing slash allowed);
     otherwise it's left alone and the saved originals are dropped. Keys the user changed after enable
     (current is neither ours nor the original) are named; "ours" for mode is `local` when
     `$VOX_EXCLUSIVE` exists. Not done yet: `disable`/`enable` restart Voxtype twice (one is enough),
