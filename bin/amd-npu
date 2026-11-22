@@ -470,7 +470,7 @@ voxtype_restore() {
   # before the [whisper] write, so config.toml.latest keeps the changed values
   voxtype_engine_restore  # only here and in the no-original branch: the endpoint is ours
   voxtype_cfg set "${args[@]}"
-  (( ${#changed[@]} )) && note "Changed after enable, reset to your earlier values: ${changed[*]} (previous file: $VOX_STATE/config.toml.latest)"
+  (( ${#changed[@]} )) && note "Your [whisper] edits since enable were replaced by your earlier values: ${changed[*]} (the edited file is in $VOX_STATE/config.toml.latest)"
   # Cleared, so a later enable records whatever the user has set by then.
   rm -f "$VOX_ORIGINAL" "$VOX_EXCLUSIVE"
   systemctl --user restart voxtype.service 2>/dev/null || true

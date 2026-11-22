@@ -147,7 +147,7 @@ power panels:
 |:---:|:---:|:---:|:---:|
 | <img src="docs/screenshots/card-whisper.png" width="200" alt="Card with Whisper only: NPU switch on showing what it holds, downloaded models (Gemma 4 12B and E4B, Qwen 3.5 4B) with Share / NPU only, the Context sizes and Load, dictation details, microphone, F9 mode, silence warning and the Embeddings switch"> | <img src="docs/screenshots/card-share.png" width="200" alt="Card with Gemma 4 E4B loaded next to Whisper at 128k context: model details, context, memory, API address, Test LLM, Chat and Unload; embeddings paused"> | <img src="docs/screenshots/card-exclusive.png" width="200" alt="Card with Gemma 4 12B on the NPU alone at its default 32k context: Share the NPU with dictation button, Voxtype on its CPU model, embeddings still paused"> | <img src="docs/screenshots/card-released.png" width="200" alt="Card with the NPU released: switch off, NPU and memory free, dictation on the CPU model, settings that need the NPU dimmed"> |
 
-- **Header:** READY, READY + LLM, LLM ONLY, RELEASED, LOCAL MODEL (Voxtype on its CPU model) or STOPPED, plus
+- **Header:** READY, READY + LLM, LLM ONLY, RELEASED, CPU MODEL (Voxtype on its CPU model), the other engine's name, OTHER SERVER, GUARD OFF or STOPPED, plus
   your last dictation time.
 - **NPU:** the on/off switch, showing what the NPU holds (e.g. "On: dictation + gemma4-it:e4b (5.7 GB
   NPU + 4.3 GB)"). Off **releases** the NPU: the server and any model stop, their memory is freed at

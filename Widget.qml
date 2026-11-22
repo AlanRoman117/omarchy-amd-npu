@@ -264,9 +264,13 @@ Panel {
     if (released) return "RELEASED"
     if (status !== "ready") return "STOPPED"
     if (exclusive) return "LLM ONLY"
+    if (info.guardIgnored === true) return "GUARD OFF"
     if (llm && backendNpu) return "READY + LLM"
     if (backendNpu) return "READY"
-    return "LOCAL MODEL"
+    var eng = otherEngine()
+    if (eng !== "") return eng.toUpperCase()
+    if (info.backend === "remote") return "OTHER SERVER"
+    return "CPU MODEL"
   }
 
   function setupText() {
@@ -795,7 +799,9 @@ Panel {
     active: root.recWarn
     dimmed: root.status !== "ready" && !root.recording
     tooltipText: root.opened || root.recording ? "" : (root.status === "ready"
-      ? (root.llm ? "AMD NPU: dictation + " + root.llm.name : "AMD NPU: dictation ready")
+      ? (root.info.guardIgnored === true ? "AMD NPU: guard not active"
+      : (!root.backendNpu && !root.exclusive && !root.released ? "AMD NPU: dictation not on the NPU"
+      : (root.llm ? "AMD NPU: dictation + " + root.llm.name : "AMD NPU: dictation ready")))
       : (root.stuck ? "AMD NPU: driver stuck, reboot needed" : (root.released ? "AMD NPU: released"
       : (root.setupMode ? "AMD NPU: not set up yet" : "AMD NPU server stopped"))))
     onPressed: function(b) { root.toggle() }
@@ -880,7 +886,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 text: root.statusCaption()
-                color: Qt.darker(root.bar.foreground, 1.4)
+                color: root.status === "ready" && !root.exclusive && root.info.guardIgnored === true ? Commons.Color.urgent : Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true

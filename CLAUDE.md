@@ -178,7 +178,7 @@ because only NPU dictations are counted.
   Voxtype is in remote mode at our URL. `voxtype_guard_on/off` prepend/strip
   `python3 <path>/dictation-guard.py; ` so a user's own hook survives. Test the cancel path by
   stopping the socket (`systemctl --user stop amd-npu-proxy.socket amd-npu-proxy.service`), then
-  `voxtype record start`: the log shows "pre_recording hook failed ... port 52625 is none" and the
+  `voxtype record start`: the log shows "pre_recording hook failed ... nothing holds port 52625 for this account" and the
   state is idle ~50 ms after the hook (0.15.0; it was 2 s before, see Voxtype 1.3.0). Restart the socket after.
 - **`enable` doesn't run `flm validate` while the server is up** (it opens the NPU from a second
   process). The running server proves driver, firmware and memlock; firmware comes from sysfs (`fw_version`, 0.14.0).

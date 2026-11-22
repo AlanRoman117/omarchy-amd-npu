@@ -95,7 +95,9 @@ def main():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
     except (subprocess.TimeoutExpired, OSError):
         pass
-    print(f"amd-npu dictation guard: port {PORT} is {owner}; recording cancelled", file=sys.stderr)
+    what = (f"another account holds port {PORT}" if owner == "other"
+            else f"nothing holds port {PORT} for this account")
+    print(f"amd-npu dictation guard: {what}; recording cancelled", file=sys.stderr)
     return 1
 
 
