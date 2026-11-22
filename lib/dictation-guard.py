@@ -8,11 +8,19 @@ audio is sent and says why. With Voxtype on its CPU model (NPU-only mode, releas
 
 Stdlib only, no arguments. Exits 1 after cancelling (Voxtype logs the hook's failure and carries on;
 the cancel is what stops the recording).
+
+Why it polls for the trigger file instead of waiting for `voxtype record cancel`: Voxtype awaits this
+hook inline, with no timeout. The CLI waits up to 2 s for the daemon to acknowledge the cancel, and
+the daemon can't acknowledge while it is blocked in this hook, so waiting on the CLI stalled every
+cancel by 2 s. Instead the CLI is started and not waited for. The cancel trigger file being on disk
+before the hook returns is what guarantees the cancel wins over a queued stop, so the hook polls for
+that file (up to 1 s) and returns. The CLI exits by itself after its own timeout.
 """
 
 import os
 import subprocess
 import sys
+import time
 import tomllib
 
 PORT = 52625
@@ -58,15 +66,34 @@ def main():
     owner = port_owner()
     if owner == "own":
         return 0
-    subprocess.run(["voxtype", "record", "cancel"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cancel_file = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}",
+                               "voxtype", "cancel")
+    try:
+        proc = subprocess.Popen(["voxtype", "record", "cancel"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except OSError:
+        proc = None  # voxtype missing: still notify
+    if proc is not None:
+        deadline = time.monotonic() + 1.0
+        while not os.path.exists(cancel_file) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not os.path.exists(cancel_file):
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
     if owner == "other":
         body = (f"Another account on this computer is listening on port {PORT}, where dictation goes. "
                 "The recording was cancelled before any audio was sent. Run 'amd-npu doctor'.")
     else:
         body = (f"Nothing holds port {PORT} for this account (amd-npu-proxy.socket isn't running), so "
                 "dictation could reach another account. Recording cancelled. Run 'amd-npu enable'.")
-    subprocess.run(["notify-send", "-u", "critical", "-a", "AMD NPU", "Dictation cancelled", body],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(["notify-send", "-u", "critical", "-a", "AMD NPU", "Dictation cancelled", body],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
     print(f"amd-npu dictation guard: port {PORT} is {owner}; recording cancelled", file=sys.stderr)
     return 1
 
